@@ -8,6 +8,8 @@ import { DocumentId } from '../../../../platform/inlineEdits/common/dataTypes/do
 import { Edits } from '../../../../platform/inlineEdits/common/dataTypes/edit';
 import { LanguageId } from '../../../../platform/inlineEdits/common/dataTypes/languageId';
 import { AggressivenessLevel, CurrentFileOptions, DEFAULT_OPTIONS, GlobalBudgetOptions, IncludeLineNumbersOption, PromptingStrategy, PromptOptions } from '../../../../platform/inlineEdits/common/dataTypes/xtabPromptOptions';
+import { LanguageContextResponse } from '../../../../platform/inlineEdits/common/dataTypes/languageContext';
+import { ContextKind } from '../../../../platform/languageServer/common/languageContextService';
 import { StatelessNextEditDocument } from '../../../../platform/inlineEdits/common/statelessNextEditProvider';
 import { TestLanguageDiagnosticsService } from '../../../../platform/languages/common/testLanguageDiagnosticsService';
 import { Result } from '../../../../util/common/result';
@@ -16,8 +18,9 @@ import { StringEdit } from '../../../../util/vs/editor/common/core/edits/stringE
 import { Position } from '../../../../util/vs/editor/common/core/position';
 import { OffsetRange } from '../../../../util/vs/editor/common/core/ranges/offsetRange';
 import { StringText } from '../../../../util/vs/editor/common/core/text/abstractText';
+import { Uri } from '../../../../vscodeTypes';
 import { LintErrors } from '../../common/lintErrors';
-import { constructTaggedFile, createTaggedCurrentFileContentUsingPagedClipping, expandRangeToPageRange, getUserPrompt, PromptPieces } from '../../common/promptCrafting';
+import { constructTaggedFile, createTaggedCurrentFileContentUsingPagedClipping, expandRangeToPageRange, getUserPrompt, PromptPieces, runGlobalBudgetCascade } from '../../common/promptCrafting';
 import { PromptTags } from '../../common/tags';
 import { CurrentDocument } from '../../common/xtabCurrentDocument';
 
@@ -45,6 +48,7 @@ describe('expandRangeToPageRange', () => {
 			PAGE_SIZE,
 			2 * PAGE_SIZE, // budget for 2 pages
 			computeTokens, // pay 1 token per line (1 token for newline)
+			false,
 			false
 		);
 
@@ -67,6 +71,7 @@ describe('expandRangeToPageRange', () => {
 			PAGE_SIZE,
 			UNLIM_BUDGET,
 			computeTokens,
+			false,
 			false
 		);
 
@@ -75,6 +80,57 @@ describe('expandRangeToPageRange', () => {
 			  "budgetLeft": 4973,
 			  "firstPageIdx": 0,
 			  "lastPageIdxIncl": 4,
+			}
+		`);
+	});
+
+	it('does not donate leftover above-cursor budget to below-cursor by default', () => {
+
+		// Focal page is page 0, so there are no pages above the cursor to spend the
+		// upper half of the budget on. With an even split that upper half is
+		// discarded, so the lower half (15 tokens) only reaches one more page.
+		const nDocLines = 47;
+		const docLines = nLines(nDocLines).getLines();
+		const r = expandRangeToPageRange(
+			docLines,
+			new OffsetRange(0, 1),
+			PAGE_SIZE,
+			40, // page 0 costs 10 => availableTokenBudget 30 => 15 per half
+			computeTokens,
+			false,
+			false /* useLeftoverBudgetFromAbove */
+		);
+
+		expect(r).toMatchInlineSnapshot(`
+			{
+			  "budgetLeft": 5,
+			  "firstPageIdx": 0,
+			  "lastPageIdxIncl": 1,
+			}
+		`);
+	});
+
+	it('donates leftover above-cursor budget to below-cursor when enabled', () => {
+
+		// Same setup, but with donation enabled the unused upper half is given to
+		// the below-cursor expansion, so it reaches three more pages instead of one.
+		const nDocLines = 47;
+		const docLines = nLines(nDocLines).getLines();
+		const r = expandRangeToPageRange(
+			docLines,
+			new OffsetRange(0, 1),
+			PAGE_SIZE,
+			40,
+			computeTokens,
+			false,
+			true /* useLeftoverBudgetFromAbove */
+		);
+
+		expect(r).toMatchInlineSnapshot(`
+			{
+			  "budgetLeft": 0,
+			  "firstPageIdx": 0,
+			  "lastPageIdxIncl": 3,
 			}
 		`);
 	});
@@ -246,7 +302,7 @@ suite('Paged clipping - current file', () => {
 			new OffsetRange(10, 14),
 			computeTokens,
 			10,
-			{ ...opts, maxTokens: 50 }
+			{ ...opts, maxTokens: 50, useLeftoverBudgetFromAbove: false }
 		);
 		assert(result.isOk());
 		const taggedCurrentFileContent = result.val;
@@ -556,6 +612,7 @@ describe('getUserPrompt', () => {
 		strategy: PromptingStrategy | undefined;
 		includeLineNumbers?: IncludeLineNumbersOption;
 		includePostScript?: boolean;
+		aggressivenessLevel?: AggressivenessLevel;
 	}): PromptPieces {
 		const currentDocLines = ['function foo() {', '  const x = 1;', '  return x;', '}', ''];
 		const docText = new StringText(currentDocLines.join('\n'));
@@ -592,7 +649,7 @@ describe('getUserPrompt', () => {
 			currentDocLines,
 			'<area>some code</area>',
 			undefined,
-			AggressivenessLevel.Medium,
+			opts.aggressivenessLevel ?? AggressivenessLevel.Medium,
 			new LintErrors(documentId, currentDocument, new TestLanguageDiagnosticsService()),
 			s => Math.ceil(s.length / 4),
 			promptOptions,
@@ -703,6 +760,67 @@ describe('getUserPrompt', () => {
 		// No line number prefix — cursor line starts directly with content
 		expect(prompt).toContain(PromptTags.CURSOR_LOCATION.start + '\n' + '  const ' + PromptTags.CURSOR + 'x = 1;' + '\n' + PromptTags.CURSOR_LOCATION.end);
 	});
+
+	describe('Xtab275AggressivenessHighLow', () => {
+		test('medium level does not include aggressive tag', () => {
+			const pieces = createTestPromptPieces({
+				cursorLine: 2, cursorColumn: 1,
+				strategy: PromptingStrategy.Xtab275AggressivenessHighLow,
+				aggressivenessLevel: AggressivenessLevel.Medium,
+			});
+			const { prompt } = getUserPrompt(pieces);
+
+			expect(prompt).toContain('Do not skip any lines. Do not be lazy.');
+			expect(prompt).not.toContain('<|aggressive|>');
+			expect(prompt).not.toContain('<|/aggressive|>');
+		});
+
+		test('high level includes aggressive tag with high', () => {
+			const pieces = createTestPromptPieces({
+				cursorLine: 2, cursorColumn: 1,
+				strategy: PromptingStrategy.Xtab275AggressivenessHighLow,
+				aggressivenessLevel: AggressivenessLevel.High,
+			});
+			const { prompt } = getUserPrompt(pieces);
+
+			expect(prompt).toContain('<|aggressive|>high<|/aggressive|>');
+		});
+
+		test('low level includes aggressive tag with low', () => {
+			const pieces = createTestPromptPieces({
+				cursorLine: 2, cursorColumn: 1,
+				strategy: PromptingStrategy.Xtab275AggressivenessHighLow,
+				aggressivenessLevel: AggressivenessLevel.Low,
+			});
+			const { prompt } = getUserPrompt(pieces);
+
+			expect(prompt).toContain('<|aggressive|>low<|/aggressive|>');
+		});
+
+		test('high level includes xtab275 base postscript text', () => {
+			const pieces = createTestPromptPieces({
+				cursorLine: 2, cursorColumn: 1,
+				strategy: PromptingStrategy.Xtab275AggressivenessHighLow,
+				aggressivenessLevel: AggressivenessLevel.High,
+			});
+			const { prompt } = getUserPrompt(pieces);
+
+			expect(prompt).toContain('Do not skip any lines. Do not be lazy.');
+		});
+	});
+
+	describe('Xtab275Aggressiveness', () => {
+		test('medium level includes aggressive tag (unlike HighLow variant)', () => {
+			const pieces = createTestPromptPieces({
+				cursorLine: 2, cursorColumn: 1,
+				strategy: PromptingStrategy.Xtab275Aggressiveness,
+				aggressivenessLevel: AggressivenessLevel.Medium,
+			});
+			const { prompt } = getUserPrompt(pieces);
+
+			expect(prompt).toContain('<|aggressive|>medium<|/aggressive|>');
+		});
+	});
 });
 
 describe('getUserPrompt — globalBudget cascade', () => {
@@ -724,7 +842,7 @@ describe('getUserPrompt — globalBudget cascade', () => {
 		return { activeDoc, currentDocument, currentDocLines };
 	}
 
-	function makePieces(globalBudget: PromptOptions['globalBudget']): PromptPieces {
+	function makePieces(globalBudget: PromptOptions['globalBudget'], extra?: { langCtx?: LanguageContextResponse; precomputedCascade?: ReturnType<typeof runGlobalBudgetCascade> }): PromptPieces {
 		const { activeDoc, currentDocument, currentDocLines } = makeActiveDoc();
 		const promptOptions: PromptOptions = {
 			...DEFAULT_OPTIONS,
@@ -739,12 +857,26 @@ describe('getUserPrompt — globalBudget cascade', () => {
 			[],
 			currentDocLines,
 			'<area>some code</area>',
-			undefined,
+			extra?.langCtx,
 			AggressivenessLevel.Medium,
 			new LintErrors(activeDoc.id, currentDocument, new TestLanguageDiagnosticsService()),
 			s => Math.ceil(s.length / 4),
 			promptOptions,
+			undefined,
+			extra?.precomputedCascade,
 		);
+	}
+
+	function makeLangCtxWithSnippet(value: string): LanguageContextResponse {
+		return {
+			start: 0,
+			end: 0,
+			items: [{
+				context: { kind: ContextKind.Snippet, priority: 1, uri: Uri.parse('file:///test/ctx.ts'), value },
+				timeStamp: 0,
+				onTimeout: false,
+			}],
+		};
 	}
 
 	test('produces the same prompt as legacy path when budgets are large', () => {
@@ -783,6 +915,7 @@ describe('getUserPrompt — globalBudget cascade', () => {
 			totalTokens: 1000,
 			order: GlobalBudgetOptions.DEFAULT_ORDER,
 			shares: {
+				currentFile: 0.5,
 				recentlyViewedDocuments: 0.5,
 				languageContext: 0.5,
 				neighborFiles: 0.5,
@@ -798,11 +931,79 @@ describe('getUserPrompt — globalBudget cascade', () => {
 			order: GlobalBudgetOptions.DEFAULT_ORDER,
 			// missing 'diffHistory'
 			shares: {
+				currentFile: 0.2,
 				languageContext: 0.4,
-				recentlyViewedDocuments: 0.4,
+				recentlyViewedDocuments: 0.2,
 				neighborFiles: 0.2,
-			} as Record<'languageContext' | 'recentlyViewedDocuments' | 'neighborFiles' | 'diffHistory', number>,
+			} as Record<'currentFile' | 'languageContext' | 'recentlyViewedDocuments' | 'neighborFiles' | 'diffHistory', number>,
 		});
 		expect(() => getUserPrompt(pieces)).toThrow(/shares is missing entry for 'diffHistory'/);
+	});
+
+	test('throws when shares is missing an entry for currentFile', () => {
+		const pieces = makePieces({
+			totalTokens: 1000,
+			order: GlobalBudgetOptions.DEFAULT_ORDER,
+			// missing 'currentFile'
+			shares: {
+				languageContext: 0.25,
+				recentlyViewedDocuments: 0.25,
+				neighborFiles: 0.25,
+				diffHistory: 0.25,
+			} as Record<'currentFile' | 'languageContext' | 'recentlyViewedDocuments' | 'neighborFiles' | 'diffHistory', number>,
+		});
+		expect(() => getUserPrompt(pieces)).toThrow(/shares is missing entry for 'currentFile'/);
+	});
+
+	function runCascade(globalBudget: GlobalBudgetOptions, extra?: { langCtx?: LanguageContextResponse }) {
+		const { activeDoc } = makeActiveDoc();
+		const opts: PromptOptions = { ...DEFAULT_OPTIONS, globalBudget };
+		return runGlobalBudgetCascade(activeDoc, [], extra?.langCtx, s => Math.ceil(s.length / 4), opts, undefined, globalBudget);
+	}
+
+	test('finalSurplus carries the full unused pool when no cascade part consumes budget', () => {
+		// No langCtx, empty history and neighbors disabled ⇒ every cascade part
+		// consumes 0, so the entire non-currentFile pool carries to finalSurplus.
+		// DEFAULT_TOTAL_TOKENS (7500) − currentFileBudget (1500) = 6000. This is
+		// exactly the budget the provider adds to the current file's clip
+		// (currentFileBudget 1500 + finalSurplus 6000 = 7500 = T).
+		const cascade = runCascade({
+			totalTokens: GlobalBudgetOptions.DEFAULT_TOTAL_TOKENS,
+			order: GlobalBudgetOptions.DEFAULT_ORDER,
+			shares: GlobalBudgetOptions.DEFAULT_SHARES,
+		});
+		expect(cascade.finalSurplus).toBe(6000);
+	});
+
+	test('finalSurplus shrinks by what the cascade consumes, so the current file reuses less leftover', () => {
+		const globalBudget: GlobalBudgetOptions = {
+			totalTokens: GlobalBudgetOptions.DEFAULT_TOTAL_TOKENS,
+			order: GlobalBudgetOptions.DEFAULT_ORDER,
+			shares: GlobalBudgetOptions.DEFAULT_SHARES,
+		};
+		// Empty cascade ⇒ the whole non-currentFile pool (6000) carries to finalSurplus.
+		const empty = runCascade(globalBudget);
+		// A rendered language-context snippet consumes budget from the pool, so less
+		// leftover carries to finalSurplus. The provider clips the current file last to
+		// currentFileBudget + finalSurplus, so a smaller finalSurplus ⇒ the current file
+		// reuses less leftover (it is trimmed more) once other parts have content.
+		const consuming = runCascade(globalBudget, { langCtx: makeLangCtxWithSnippet('const ctxMarker = 1;\n'.repeat(40)) });
+		expect(consuming.finalSurplus).toBeLessThan(empty.finalSurplus);
+	});
+
+	test('precomputedCascade produces an identical prompt to computing the cascade internally', () => {
+		const snippet = 'const sharedCtxMarker = 42;';
+		const globalBudget: PromptOptions['globalBudget'] = {
+			totalTokens: 100000,
+			order: GlobalBudgetOptions.DEFAULT_ORDER,
+			shares: GlobalBudgetOptions.DEFAULT_SHARES,
+		};
+		const internal = getUserPrompt(makePieces(globalBudget, { langCtx: makeLangCtxWithSnippet(snippet) }));
+
+		const cascade = runCascade(globalBudget, { langCtx: makeLangCtxWithSnippet(snippet) });
+		const precomputed = getUserPrompt(makePieces(globalBudget, { langCtx: makeLangCtxWithSnippet(snippet), precomputedCascade: cascade }));
+
+		expect(precomputed.prompt).toBe(internal.prompt);
+		expect(precomputed.nDiffsInPrompt).toBe(internal.nDiffsInPrompt);
 	});
 });
