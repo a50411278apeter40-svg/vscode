@@ -1010,6 +1010,30 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		return VSBuffer.wrap(clipboard.readBuffer(format));
 	}
 
+	async readClipboardFilePaths(windowId: number | undefined): Promise<string[]> {
+		const rawURI = (clipboard as any).read('text/uri-list');
+		if(!rawURI) {
+			return [];
+		}
+
+		const lines = rawURI.split(/[\r\n]+/);
+		const paths: string[] = [];
+
+		for(const line of lines) {
+			let trimmed = line.trim();
+			if(!trimmed || trimmed[0] === '#') {
+				continue;
+			}
+
+			if(trimmed.startsWith('file://')) {
+				trimmed = trimmed.slice(7);
+			}
+
+			paths.push(decodeURIComponent(trimmed));
+		}
+		return paths;
+	}
+
 	async hasClipboard(windowId: number | undefined, format: string, type?: 'selection' | 'clipboard'): Promise<boolean> {
 		return clipboard.has(format, type);
 	}
