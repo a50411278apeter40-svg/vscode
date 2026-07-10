@@ -8,6 +8,8 @@ import { Event } from '../../../../../../base/common/event.js';
 import { DisposableStore } from '../../../../../../base/common/lifecycle.js';
 import { observableValue } from '../../../../../../base/common/observable.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
+import { IActionWidgetService } from '../../../../../../platform/actionWidget/browser/actionWidget.js';
+import { IActionListDelegate, IActionListItem } from '../../../../../../platform/actionWidget/browser/actionList.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../../../platform/contextkey/common/contextkey.js';
 import { MockContextKeyService } from '../../../../../../platform/keybinding/test/common/mockKeybindingService.js';
@@ -16,21 +18,31 @@ import { TestInstantiationService } from '../../../../../../platform/instantiati
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../../../../../platform/telemetry/common/telemetryUtils.js';
 import { GitRefType } from '../../../../../../workbench/contrib/git/common/gitService.js';
+import { ICommandService } from '../../../../../../platform/commands/common/commands.js';
+import { IDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
 import { ISessionsProvidersService } from '../../../../../services/sessions/browser/sessionsProvidersService.js';
 import { IActiveSession, ISessionsManagementService } from '../../../../../services/sessions/common/sessionsManagement.js';
 import { CopilotChatSessionsProvider } from '../../browser/copilotChatSessionsProvider.js';
 import { IsolationMode, IsolationPicker } from '../../browser/isolationPicker.js';
 
-function getCheckbox(container: HTMLElement): HTMLElement {
-	const checkbox = container.querySelector<HTMLElement>('.monaco-checkbox');
-	assert.ok(checkbox, 'expected a worktree checkbox to be rendered');
-	return checkbox;
+interface IIsolationActionItem {
+	readonly mode: IsolationMode;
+	readonly checked?: boolean;
+}
+
+function showPicker(container: HTMLElement): void {
+	const trigger = container.querySelector<HTMLElement>('a.action-label');
+	assert.ok(trigger);
+	trigger.click();
 }
 
 function createPicker(
 	disposables: DisposableStore,
 	mode: IsolationMode,
-	setModeCalls: IsolationMode[],
+	actionWidgetItems: IActionListItem<IIsolationActionItem>[],
+	hasGitRepo = true,
+	hasHeadCommit = true,
+	spies?: { dialogCalls: unknown[]; commandCalls: unknown[]; delegate?: IActionListDelegate<IIsolationActionItem> }
 ): IsolationPicker {
 	const instantiationService = disposables.add(new TestInstantiationService());
 	const activeSession = {
@@ -40,7 +52,7 @@ function createPicker(
 	} as unknown as IActiveSession;
 	const isolationMode = observableValue<IsolationMode | undefined>('isolationMode', mode);
 	const gitState = observableValue('gitState', {
-		HEAD: { type: GitRefType.Head, name: 'main', commit: 'abc123' },
+		HEAD: hasHeadCommit ? { type: GitRefType.Head, name: 'main', commit: 'abc123' } : undefined,
 		remotes: [],
 		mergeChanges: [],
 		indexChanges: [],
@@ -49,15 +61,26 @@ function createPicker(
 	});
 	const provider = Object.assign(Object.create(CopilotChatSessionsProvider.prototype), {
 		getSession: () => ({
-			gitRepository: { state: gitState },
+			gitRepository: hasGitRepo ? { state: gitState } : undefined,
+			gitRepositoryObservable: observableValue('gitRepositoryObservable', hasGitRepo ? { state: gitState } : undefined),
 			isolationMode,
-			setIsolationMode: (next: IsolationMode) => {
-				setModeCalls.push(next);
-				isolationMode.set(next, undefined);
+			setIsolationMode: (mode: IsolationMode) => {
+				isolationMode.set(mode, undefined);
 			},
+			resolveGitRepository: async () => { },
 		}),
 	});
 
+	instantiationService.stub(IActionWidgetService, {
+		isVisible: false,
+		hide: () => { },
+		show: <T>(_id: string, _supportsPreview: boolean, items: IActionListItem<T>[], delegate?: IActionListDelegate<T>) => {
+			actionWidgetItems.splice(0, actionWidgetItems.length, ...(items as IActionListItem<IIsolationActionItem>[]));
+			if (spies) {
+				spies.delegate = delegate as unknown as IActionListDelegate<IIsolationActionItem>;
+			}
+		},
+	});
 	instantiationService.stub(IConfigurationService, new TestConfigurationService());
 	const sessionObs = observableValue<IActiveSession | undefined>('activeSession', activeSession);
 	instantiationService.stub(ISessionsManagementService, {
@@ -71,6 +94,22 @@ function createPicker(
 	instantiationService.stub(ITelemetryService, NullTelemetryService);
 	instantiationService.stub(IContextKeyService, new MockContextKeyService());
 
+	instantiationService.stub(IDialogService, {
+		confirm: async (args: unknown) => {
+			spies?.dialogCalls.push(args);
+			return { confirmed: true };
+		},
+		prompt: async (args: unknown) => {
+			spies?.dialogCalls.push(args);
+			return { result: undefined };
+		},
+	} as unknown as IDialogService);
+	instantiationService.stub(ICommandService, {
+		executeCommand: async (id: string, ...args: unknown[]) => {
+			spies?.commandCalls.push({ id, args });
+		},
+	} as unknown as ICommandService);
+
 	return disposables.add(instantiationService.createInstance(IsolationPicker, sessionObs));
 }
 
@@ -83,42 +122,97 @@ suite('IsolationPicker', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('checkbox unchecked when workspace isolation is selected', () => {
-		const picker = createPicker(disposables, 'workspace', []);
+	test('marks folder as checked when workspace isolation is selected', () => {
+		const actionWidgetItems: IActionListItem<IIsolationActionItem>[] = [];
+		const picker = createPicker(disposables, 'workspace', actionWidgetItems);
 		const container = document.createElement('div');
 		picker.render(container);
+		showPicker(container);
 
-		assert.strictEqual(getCheckbox(container).getAttribute('aria-checked'), 'false');
+		assert.deepStrictEqual(
+			actionWidgetItems.map(item => ({ label: item.label, checked: item.item?.checked })),
+			[
+				{ label: 'Worktree', checked: undefined },
+				{ label: 'Folder', checked: true },
+			],
+		);
 	});
 
-	test('checkbox checked when worktree isolation is selected', () => {
-		const picker = createPicker(disposables, 'worktree', []);
+	test('marks worktree as checked when worktree isolation is selected', () => {
+		const actionWidgetItems: IActionListItem<IIsolationActionItem>[] = [];
+		const picker = createPicker(disposables, 'worktree', actionWidgetItems);
 		const container = document.createElement('div');
 		picker.render(container);
+		showPicker(container);
 
-		assert.strictEqual(getCheckbox(container).getAttribute('aria-checked'), 'true');
+		assert.deepStrictEqual(
+			actionWidgetItems.map(item => ({ label: item.label, checked: item.item?.checked })),
+			[
+				{ label: 'Worktree', checked: true },
+				{ label: 'Folder', checked: undefined },
+			],
+		);
 	});
 
-	test('toggling the checkbox updates the session isolation mode', () => {
-		const setModeCalls: IsolationMode[] = [];
-		const picker = createPicker(disposables, 'worktree', setModeCalls);
+	test('shows both options when there is no Git repository, with detail text on Worktree', () => {
+		const actionWidgetItems: IActionListItem<IIsolationActionItem>[] = [];
+		const picker = createPicker(disposables, 'workspace', actionWidgetItems, false);
 		const container = document.createElement('div');
 		picker.render(container);
+		showPicker(container);
 
-		getCheckbox(container).click();
-
-		assert.deepStrictEqual(setModeCalls, ['workspace']);
-		assert.strictEqual(getCheckbox(container).getAttribute('aria-checked'), 'false');
+		assert.deepStrictEqual(
+			actionWidgetItems.map(item => ({ label: item.label, checked: item.item?.checked, detail: item.detail })),
+			[
+				{ label: 'Worktree', checked: undefined, detail: 'Requires an initialized Git repository. Select to initialize Git.' },
+				{ label: 'Folder', checked: true, detail: undefined },
+			],
+		);
 	});
 
-	test('keeps the same checkbox element across toggles', () => {
-		const picker = createPicker(disposables, 'worktree', []);
+	test('selecting Worktree when there is no Git repository prompts to initialize Git', async () => {
+		const actionWidgetItems: IActionListItem<IIsolationActionItem>[] = [];
+		const spies = { dialogCalls: [] as unknown[], commandCalls: [] as unknown[], delegate: undefined as IActionListDelegate<IIsolationActionItem> | undefined };
+		const picker = createPicker(disposables, 'workspace', actionWidgetItems, false, true, spies);
 		const container = document.createElement('div');
 		picker.render(container);
+		showPicker(container);
 
-		const before = getCheckbox(container);
-		before.click();
+		assert.ok(spies.delegate);
+		await spies.delegate.onSelect({ mode: 'worktree' });
 
-		assert.strictEqual(getCheckbox(container), before, 'checkbox element should be reused so focus is preserved');
+		assert.strictEqual(spies.dialogCalls.length, 1);
+		const dialogCall = spies.dialogCalls[0] as { message?: string };
+		assert.strictEqual(dialogCall?.message, 'Git Repository Required');
+		assert.strictEqual(spies.commandCalls.length, 1);
+		const commandCall = spies.commandCalls[0] as { id?: string; args?: unknown[] };
+		assert.strictEqual(commandCall?.id, 'git.init');
+		assert.deepStrictEqual(commandCall?.args, [true]);
+	});
+
+	test('shows Worktree detail for empty Git repository and prompts for initial commit when selected', async () => {
+		const actionWidgetItems: IActionListItem<IIsolationActionItem>[] = [];
+		const spies = { dialogCalls: [] as unknown[], commandCalls: [] as unknown[], delegate: undefined as IActionListDelegate<IIsolationActionItem> | undefined };
+		const picker = createPicker(disposables, 'workspace', actionWidgetItems, true, false, spies);
+		const container = document.createElement('div');
+		picker.render(container);
+		showPicker(container);
+
+		assert.deepStrictEqual(
+			actionWidgetItems.map(item => ({ label: item.label, checked: item.item?.checked, detail: item.detail })),
+			[
+				{ label: 'Worktree', checked: undefined, detail: 'Requires at least one commit. Create a commit to enable Worktree.' },
+				{ label: 'Folder', checked: true, detail: undefined },
+			],
+		);
+
+		assert.ok(spies.delegate);
+		await spies.delegate.onSelect({ mode: 'worktree' });
+
+		assert.strictEqual(spies.dialogCalls.length, 1);
+		const dialogCall = spies.dialogCalls[0] as { message?: string };
+		assert.strictEqual(dialogCall?.message, 'Initial Commit Required');
+		// Should NOT invoke git.init
+		assert.strictEqual(spies.commandCalls.length, 0);
 	});
 });
