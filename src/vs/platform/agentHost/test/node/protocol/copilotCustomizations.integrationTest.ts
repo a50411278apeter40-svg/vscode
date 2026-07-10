@@ -14,8 +14,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from '../../../../../base/common/path.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { AgentHostConfigKey, type SessionCustomizationDiscoveryMode } from '../../../common/agentHostCustomizationConfig.js';
 import { ActionType, SessionCustomizationsChangedAction } from '../../../common/state/sessionActions.js';
-import { CustomizationType, type DirectoryCustomization } from '../../../common/state/sessionState.js';
+import { CustomizationType, ROOT_STATE_URI, type DirectoryCustomization } from '../../../common/state/sessionState.js';
 import { type AhpNotification } from '../../../common/state/sessionProtocol.js';
 import { createRealSession, dispatchTurn, IAgentHostE2EProviderConfig } from './agentHostE2ETestHelpers.js';
 import { getActionEnvelope, isActionNotification, IServerHandle, startRealServer, TestProtocolClient } from './testHelpers.js';
@@ -110,13 +111,23 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 		]);
 	}
 
-	test('detects only directory customizations on an empty workspace via session/customizationsChanged after hello (mock LLM)', async function () {
-		this.timeout(TEST_TIMEOUT_MS);
+	async function setSessionCustomizationDiscoveryMode(mode: SessionCustomizationDiscoveryMode): Promise<void> {
+		client.dispatch({
+			channel: ROOT_STATE_URI,
+			clientSeq: 1,
+			action: {
+				type: ActionType.RootConfigChanged,
+				config: { [AgentHostConfigKey.SessionCustomizationDiscoveryMode]: mode },
+			},
+		});
+	}
 
+	async function runEmptyWorkspaceCustomizationsTest(discoveryMode: SessionCustomizationDiscoveryMode): Promise<void> {
 		const workspaceDir = await mkdtemp(`${tmpdir()}/ahp-customizations-empty-mock-`);
 		tempDirs.push(workspaceDir);
 
 		const sessionUri = await createRealSession(client, COPILOT_CONFIG, 'real-sdk-customizations-empty-mock', createdSessions, URI.file(workspaceDir));
+		await setSessionCustomizationDiscoveryMode(discoveryMode);
 		client.dispatch({
 			channel: sessionUri,
 			clientSeq: 1,
@@ -139,33 +150,29 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 		const customizationsAction = getActionEnvelope(customizationsNotif).action as SessionCustomizationsChangedAction;
 		const mappedCustomizations = customizationsAction.customizations.map(customization => ({
 			type: customization.type,
+			contents: customization.type === CustomizationType.Directory ? customization.contents : undefined,
 			uri: customization.uri,
 			children: customization.type === CustomizationType.Directory ? (customization.children ?? []).map(child => child.uri) : undefined,
-		}));
+		})).sort((a, b) => a.uri.localeCompare(b.uri));
 		const expectedCustomizations = [
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.agents', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.claude', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.agents', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'hooks')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'hooks')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'instructions')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'instructions')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.agents', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.claude', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'skills')).toString(), children: [] },
-		];
-		const actualByUri = new Map(mappedCustomizations.map(customization => [customization.uri, customization]));
-		assert.strictEqual(actualByUri.size, expectedCustomizations.length, `expected ${expectedCustomizations.length} unique customizations, got: ${JSON.stringify(mappedCustomizations)}`);
-		const actualCustomizations = expectedCustomizations.map(expected => actualByUri.get(expected.uri));
-		assert.deepStrictEqual(actualCustomizations, expectedCustomizations);
-	});
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.agents', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.claude', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.github', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(userHomeDir, '.agents', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(userHomeDir, '.copilot', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Hook, uri: URI.file(join(workspaceDir, '.github', 'hooks')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Hook, uri: URI.file(join(userHomeDir, '.copilot', 'hooks')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Rule, uri: URI.file(join(workspaceDir, '.github', 'instructions')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Rule, uri: URI.file(join(userHomeDir, '.copilot', 'instructions')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.agents', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.claude', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.github', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(userHomeDir, '.copilot', 'skills')).toString(), children: [] },
+		].sort((a, b) => a.uri.localeCompare(b.uri));
+		assert.deepStrictEqual(mappedCustomizations, expectedCustomizations);
+	}
 
-	test('detects workspace agents, instructions, skills, and hooks via session/customizationsChanged after hello (mock LLM)', async function () {
-		this.timeout(TEST_TIMEOUT_MS);
-
+	async function runWorkspaceCustomizationsTest(discoveryMode: SessionCustomizationDiscoveryMode): Promise<void> {
 		const workspaceDir = await mkdtemp(`${tmpdir()}/ahp-customizations-test-mock-`);
 		tempDirs.push(workspaceDir);
 		const githubDir = join(workspaceDir, '.github');
@@ -248,8 +255,8 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 			].join('\n')),
 			writeFile(userHookFile, JSON.stringify({ PreToolUse: [] }, undefined, 2)),
 		]);
-
 		const sessionUri = await createRealSession(client, COPILOT_CONFIG, 'real-sdk-customizations-mock', createdSessions, URI.file(workspaceDir));
+		await setSessionCustomizationDiscoveryMode(discoveryMode);
 		client.dispatch({
 			channel: sessionUri,
 			clientSeq: 1,
@@ -272,34 +279,50 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 		const customizationsAction = getActionEnvelope(customizationsNotif).action as SessionCustomizationsChangedAction;
 		const mappedCustomizations = customizationsAction.customizations.map(customization => ({
 			type: customization.type,
+			contents: customization.type === CustomizationType.Directory ? customization.contents : undefined,
 			uri: customization.uri,
 			children: customization.type === CustomizationType.Directory ? (customization.children ?? []).map(child => child.uri) : undefined,
-		}));
+		})).sort((a, b) => a.uri.localeCompare(b.uri));
 		const expectedCustomizations = [
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.agents', 'skills')).toString(), children: [URI.file(userSkillFile).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'agents')).toString(), children: [URI.file(userAgentFile).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'hooks')).toString(), children: [URI.file(userHookFile).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'instructions')).toString(), children: [URI.file(userInstructionFile).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(userHomeDir, '.copilot', 'skills')).toString(), children: [URI.file(userCopilotSkillFile).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.agents', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.agents', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.claude', 'agents')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.claude', 'skills')).toString(), children: [] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'agents')).toString(), children: [URI.file(join(agentsDir, 'hello.agent.md')).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'hooks')).toString(), children: [URI.file(join(hooksDir, 'pre-tool.json')).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'instructions')).toString(), children: [URI.file(join(instructionsDir, 'policy.instructions.md')).toString()] },
-			{ type: CustomizationType.Directory, uri: URI.file(join(workspaceDir, '.github', 'skills')).toString(), children: [URI.file(join(skillsDir, 'SKILL.md')).toString()] },
-		];
-		const actualByUri = new Map(mappedCustomizations.map(customization => [customization.uri, customization]));
-		assert.strictEqual(actualByUri.size, expectedCustomizations.length, `expected ${expectedCustomizations.length} unique customizations, got: ${JSON.stringify(mappedCustomizations)}`);
-		const actualCustomizations = expectedCustomizations.map(expected => actualByUri.get(expected.uri));
-		assert.deepStrictEqual(actualCustomizations, expectedCustomizations);
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(userHomeDir, '.agents', 'skills')).toString(), children: [URI.file(userSkillFile).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(userHomeDir, '.copilot', 'agents')).toString(), children: [URI.file(userAgentFile).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Hook, uri: URI.file(join(userHomeDir, '.copilot', 'hooks')).toString(), children: [URI.file(userHookFile).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Rule, uri: URI.file(join(userHomeDir, '.copilot', 'instructions')).toString(), children: [URI.file(userInstructionFile).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(userHomeDir, '.copilot', 'skills')).toString(), children: [URI.file(userCopilotSkillFile).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.agents', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.agents', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.claude', 'agents')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.claude', 'skills')).toString(), children: [] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Agent, uri: URI.file(join(workspaceDir, '.github', 'agents')).toString(), children: [URI.file(join(agentsDir, 'hello.agent.md')).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Hook, uri: URI.file(join(workspaceDir, '.github', 'hooks')).toString(), children: [URI.file(join(hooksDir, 'pre-tool.json')).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Rule, uri: URI.file(join(workspaceDir, '.github', 'instructions')).toString(), children: [URI.file(join(instructionsDir, 'policy.instructions.md')).toString()] },
+			{ type: CustomizationType.Directory, contents: CustomizationType.Skill, uri: URI.file(join(workspaceDir, '.github', 'skills')).toString(), children: [URI.file(join(skillsDir, 'SKILL.md')).toString()] },
+		].sort((a, b) => a.uri.localeCompare(b.uri));
+		assert.deepStrictEqual(mappedCustomizations, expectedCustomizations);
+	}
+
+	test('detects only directory customizations on an empty workspace via session/customizationsChanged after hello (mock LLM) [scan]', async function () {
+		this.timeout(TEST_TIMEOUT_MS);
+		await runEmptyWorkspaceCustomizationsTest('scan');
 	});
 
-	test('emits session/customizationsChanged when customization files are edited, added, and removed (mock LLM)', async function () {
+	test('detects workspace agents, instructions, skills, and hooks via session/customizationsChanged after hello (mock LLM) [scan]', async function () {
 		this.timeout(TEST_TIMEOUT_MS);
+		await runWorkspaceCustomizationsTest('scan');
+	});
 
-		const workspaceDir = await mkdtemp(`${tmpdir()}/ahp-customizations-watch-mock-`);
+	test('detects only directory customizations on an empty workspace via session/customizationsChanged after hello (mock LLM) [discover]', async function () {
+		this.timeout(TEST_TIMEOUT_MS);
+		await runEmptyWorkspaceCustomizationsTest('discover');
+	});
+
+	test('detects workspace agents, instructions, skills, and hooks via session/customizationsChanged after hello (mock LLM) [discover]', async function () {
+		this.timeout(TEST_TIMEOUT_MS);
+		await runWorkspaceCustomizationsTest('discover');
+	});
+
+	async function runCustomizationWatchTest(discoveryMode: SessionCustomizationDiscoveryMode): Promise<void> {
+		const workspaceDir = await mkdtemp(`${tmpdir()}/ahp-customizations-watch-mock-${discoveryMode}-`);
 		tempDirs.push(workspaceDir);
 		const githubDir = join(workspaceDir, '.github');
 		const agentsDir = join(githubDir, 'agents');
@@ -391,8 +414,8 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 			].join('\n')),
 			writeFile(homeHookFile, JSON.stringify({ PreToolUse: [] }, undefined, 2)),
 		]);
-
 		const sessionUri = await createRealSession(client, COPILOT_CONFIG, 'real-sdk-customizations-watch-mock', createdSessions, URI.file(workspaceDir));
+		await setSessionCustomizationDiscoveryMode(discoveryMode);
 		client.dispatch({
 			channel: sessionUri,
 			clientSeq: 1,
@@ -671,7 +694,6 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 		client.clearReceived();
 		await rm(addedHomeInstructionFile, { force: true });
 		await waitForDirectoryChildNames(URI.file(homeInstructionsDir).toString(), CustomizationType.Rule, ['Home Policy Renamed']);
-
 		client.clearReceived();
 		await writeFile(homeHookFile, JSON.stringify({ PreToolUse: [{ command: 'echo home-changed' }] }, undefined, 2));
 		await waitForDirectoryChildNames(URI.file(homeHooksDir).toString(), CustomizationType.Hook, ['home-pre-tool.json']);
@@ -683,5 +705,15 @@ suite('Agent Host E2E — Copilot, Mocked LLM (customizations)', function () {
 		client.clearReceived();
 		await rm(addedHomeHookFile, { force: true });
 		await waitForDirectoryChildNames(URI.file(homeHooksDir).toString(), CustomizationType.Hook, ['home-pre-tool.json']);
+	}
+
+	test('emits session/customizationsChanged when customization files are edited, added, and removed (mock LLM) [scan]', async function () {
+		this.timeout(TEST_TIMEOUT_MS);
+		await runCustomizationWatchTest('scan');
+	});
+
+	test('emits session/customizationsChanged when customization files are edited, added, and removed (mock LLM) [discover]', async function () {
+		this.timeout(TEST_TIMEOUT_MS);
+		await runCustomizationWatchTest('discover');
 	});
 });
