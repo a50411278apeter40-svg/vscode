@@ -129,8 +129,11 @@ export function isNoAuthConfig(config: BYOKModelConfig): config is BYOKNoAuthMod
  * `maxOutputTokens > contextWindow`, or a `maxInputTokens` supplied alongside a smaller
  * `contextWindow` overflowing the window.
  */
-export function resolveModelTokenLimits(capabilities: Pick<BYOKModelCapabilities, 'maxInputTokens' | 'maxOutputTokens' | 'contextWindow'>): { contextWindow: number; maxInputTokens: number; maxOutputTokens: number } {
-	const contextWindow = capabilities.contextWindow ?? ((capabilities.maxInputTokens ?? 0) + capabilities.maxOutputTokens);
+export function resolveModelTokenLimits(capabilities: Pick<BYOKModelCapabilities, 'maxInputTokens' | 'maxOutputTokens' | 'contextWindow' | 'maxTokens'>): { contextWindow: number; maxInputTokens: number; maxOutputTokens: number } {
+	let contextWindow = capabilities.contextWindow ?? ((capabilities.maxInputTokens ?? 0) + capabilities.maxOutputTokens);
+	if (capabilities.maxTokens !== undefined) {
+		contextWindow = Math.min(contextWindow, capabilities.maxTokens);
+	}
 	// The output budget can never exceed the full window.
 	const maxOutputTokens = Math.min(capabilities.maxOutputTokens, contextWindow);
 	// The prompt budget is whatever remains after the output reservation; an explicitly
@@ -226,7 +229,6 @@ export function byokKnownModelToAPIInfo(providerName: string, id: string, capabi
 		inputCost: capabilities.credits?.input,
 		outputCost: capabilities.credits?.output,
 		cacheCost: capabilities.credits?.cacheRead,
-		...(capabilities.icon ? { icon: capabilities.icon } : {}) as any,
 		capabilities: {
 			toolCalling: capabilities.toolCalling,
 			imageInput: capabilities.vision,

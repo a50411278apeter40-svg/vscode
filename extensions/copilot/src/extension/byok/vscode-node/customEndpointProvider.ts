@@ -146,27 +146,53 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 			fetchedModels = await super.getAllModels(silent, apiKey, configuration);
 		}
 
+		const fetchedModelMap = new Map<string, OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>>();
+		for (const model of fetchedModels) {
+			fetchedModelMap.set(model.id, model);
+		}
+
 		const models: OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[] = [];
 		const explicitModels = configuration?.models || [];
 		const explicitIds = new Set(explicitModels.map(m => m.id));
 		const globalConfig = configuration?.global || {};
 
-		for (const model of fetchedModels) {
-			if (!explicitIds.has(model.id)) {
-				const mergedConfig = { ...globalConfig, id: model.id, name: model.name, url: configuration!.url! } as CustomEndpointModelConfig;
+		for (const explicitModel of explicitModels) {
+			const fetched = fetchedModelMap.get(explicitModel.id);
+			const mergedConfig: CustomEndpointModelConfig = {
+				name: fetched?.name || explicitModel.id,
+				maxInputTokens: fetched?.maxInputTokens,
+				maxOutputTokens: fetched?.maxOutputTokens,
+				...globalConfig,
+				...explicitModel
+			} as CustomEndpointModelConfig;
+			
+			const url = mergedConfig.url || configuration?.url;
+			if (url) {
 				models.push({
-					...byokKnownModelToAPIInfoWithEffort(this._name, model.id, mergedConfig),
-					url: configuration!.url!
+					...byokKnownModelToAPIInfoWithEffort(this._name, mergedConfig.id, mergedConfig),
+					url
 				});
 			}
 		}
 
-		for (const modelConfig of explicitModels) {
-			const mergedConfig = { ...globalConfig, ...modelConfig } as CustomEndpointModelConfig;
-			models.push({
-				...byokKnownModelToAPIInfoWithEffort(this._name, mergedConfig.id, mergedConfig),
-				url: mergedConfig.url || configuration?.url || ''
-			});
+		if (autoFetch) {
+			for (const model of fetchedModels) {
+				if (!explicitIds.has(model.id)) {
+					const mergedConfig = {
+						id: model.id,
+						name: model.name,
+						maxInputTokens: model.maxInputTokens,
+						maxOutputTokens: model.maxOutputTokens,
+						url: configuration!.url!,
+						...globalConfig
+					} as CustomEndpointModelConfig;
+					
+					models.push({
+						...byokKnownModelToAPIInfoWithEffort(this._name, model.id, mergedConfig),
+						url: configuration!.url!
+					});
+				}
+			}
 		}
 		
 		return models;
@@ -178,6 +204,10 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 		const modelConfiguration = { ...globalConfig, ...explicitConfig } as Partial<CustomEndpointModelConfig>;
 
 		let url = modelConfiguration.url || model.url;
+		if (!url) {
+			throw new Error('A URL must be provided either via global configuration or on the model.');
+		}
+
 		let apiType: CustomEndpointApiType;
 		
 		if (hasExplicitApiPath(url)) {
@@ -192,8 +222,8 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 			maxInputTokens: modelConfiguration.maxInputTokens ?? model.maxInputTokens,
 			maxOutputTokens: modelConfiguration.maxOutputTokens ?? model.maxOutputTokens,
 			contextWindow: modelConfiguration.contextWindow ?? modelConfiguration.maxTokens,
-			toolCalling: modelConfiguration.toolCalling ?? !!model.capabilities?.toolCalling ?? false,
-			vision: modelConfiguration.vision ?? !!model.capabilities?.imageInput ?? false,
+			toolCalling: modelConfiguration.toolCalling ?? !!model.capabilities?.toolCalling,
+			vision: modelConfiguration.vision ?? !!model.capabilities?.imageInput,
 			name: modelConfiguration.name ?? model.name,
 			url,
 			description: modelConfiguration.description,
@@ -215,8 +245,34 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 		return this._instantiationService.createInstance(CustomEndpointOAIEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);
 	}
 
-	protected getModelsBaseUrl(configuration: CustomEndpointModelProviderConfig | undefined): string | undefined {
-		return configuration?.url;
+	protected override getModelsBaseUrl(configuration: CustomEndpointModelProviderConfig | undefined): string | undefined {
+		if (!configuration?.url) {
+			return undefined;
+		}
+		try {
+			const parsed = new URL(configuration.url);
+			parsed.pathname = parsed.pathname
+				.replace(/\/chat\/completions\/?$/, '')
+				.replace(/\/messages\/?$/, '')
+				.replace(/\/responses\/?$/, '');
+			return parsed.toString();
+		} catch {
+			return configuration.url;
+		}
+	}
+
+	protected override resolveModelCapabilities(modelData: any): BYOKModelCapabilities | undefined {
+		if (!modelData || typeof modelData.id !== 'string') {
+			return undefined;
+		}
+		return {
+			name: modelData.name || modelData.id,
+			contextWindow: 128000,
+			maxOutputTokens: 8192,
+			maxInputTokens: 100000,
+			toolCalling: false,
+			vision: false
+		};
 	}
 }
 
