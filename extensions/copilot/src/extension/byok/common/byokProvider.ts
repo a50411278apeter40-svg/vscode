@@ -79,6 +79,14 @@ export interface BYOKModelCapabilities {
 	 * If unset the format is inferred from the API path the endpoint uses.
 	 */
 	reasoningEffortFormat?: 'chat-completions' | 'responses' | 'messages';
+	description?: string;
+	icon?: string;
+	maxTokens?: number;
+	credits?: {
+		input?: number;
+		output?: number;
+		cacheRead?: number;
+	};
 }
 
 export interface BYOKModelRegistry {
@@ -176,6 +184,18 @@ export function resolveModelInfo(modelId: string, providerName: string, knownMod
 	if (knownModelInfo?.requestHeaders && Object.keys(knownModelInfo.requestHeaders).length > 0) {
 		modelInfo.requestHeaders = { ...knownModelInfo.requestHeaders };
 	}
+	if (knownModelInfo?.credits) {
+		modelInfo.billing = {
+			token_prices: {
+				batch_size: 1000000,
+				default: {
+					input_price: knownModelInfo.credits.input ?? 0,
+					output_price: knownModelInfo.credits.output ?? 0,
+					cache_price: knownModelInfo.credits.cacheRead ?? 0,
+				}
+			}
+		};
+	}
 	return modelInfo;
 }
 
@@ -200,15 +220,19 @@ export function byokKnownModelToAPIInfo(providerName: string, id: string, capabi
 		// vendor (e.g. multiple Ollama servers) are distinguishable in
 		// the model picker.
 		family: id,
-		tooltip: `${capabilities.name} is contributed via the ${providerName} provider.`,
+		tooltip: capabilities.description || `${capabilities.name} is contributed via the ${providerName} provider.`,
 		multiplierNumeric: undefined,
 		isUserSelectable: true,
+		inputCost: capabilities.credits?.input,
+		outputCost: capabilities.credits?.output,
+		cacheCost: capabilities.credits?.cacheRead,
+		...(capabilities.icon ? { icon: capabilities.icon } : {}) as any,
 		capabilities: {
 			toolCalling: capabilities.toolCalling,
 			imageInput: capabilities.vision,
 			editTools: capabilities.editTools,
 		},
-	};
+	} as LanguageModelChatInformation;
 }
 
 /**

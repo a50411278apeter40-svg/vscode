@@ -83,6 +83,8 @@ function apiTypeToSupportedEndpoints(apiType: CustomEndpointApiType): ModelSuppo
 export interface CustomEndpointModelProviderConfig extends LanguageModelChatConfiguration {
 	url?: string;
 	apiType?: CustomEndpointApiType;
+	autoFetch?: boolean;
+	global?: Partial<CustomEndpointModelConfig>;
 	models?: CustomEndpointModelConfig[];
 }
 
@@ -90,6 +92,10 @@ interface _CustomEndpointModelConfig {
 	name: string;
 	url: string;
 	apiType?: CustomEndpointApiType;
+	description?: string;
+	icon?: string;
+	maxTokens?: number;
+	credits?: { input?: number; output?: number; cacheRead?: number };
 	/** Optional when {@link contextWindow} is set; then derived as `contextWindow - maxOutputTokens`. */
 	maxInputTokens?: number;
 	maxOutputTokens: number;
@@ -133,41 +139,73 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 	}
 
 	protected override async getAllModels(silent: boolean, apiKey: string | undefined, configuration: CustomEndpointModelProviderConfig | undefined): Promise<OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[]> {
-		if (configuration?.url) {
-			return super.getAllModels(silent, apiKey, configuration);
+		const autoFetch = configuration?.autoFetch ?? (!configuration?.models || configuration.models.length === 0);
+		
+		let fetchedModels: OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[] = [];
+		if (autoFetch && configuration?.url) {
+			fetchedModels = await super.getAllModels(silent, apiKey, configuration);
 		}
+
 		const models: OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[] = [];
-		if (Array.isArray(configuration?.models)) {
-			for (const modelConfig of configuration.models) {
+		const explicitModels = configuration?.models || [];
+		const explicitIds = new Set(explicitModels.map(m => m.id));
+		const globalConfig = configuration?.global || {};
+
+		for (const model of fetchedModels) {
+			if (!explicitIds.has(model.id)) {
+				const mergedConfig = { ...globalConfig, id: model.id, name: model.name, url: configuration!.url! } as CustomEndpointModelConfig;
 				models.push({
-					...byokKnownModelToAPIInfoWithEffort(this._name, modelConfig.id, modelConfig),
-					url: modelConfig.url
+					...byokKnownModelToAPIInfoWithEffort(this._name, model.id, mergedConfig),
+					url: configuration!.url!
 				});
 			}
 		}
+
+		for (const modelConfig of explicitModels) {
+			const mergedConfig = { ...globalConfig, ...modelConfig } as CustomEndpointModelConfig;
+			models.push({
+				...byokKnownModelToAPIInfoWithEffort(this._name, mergedConfig.id, mergedConfig),
+				url: mergedConfig.url || configuration?.url || ''
+			});
+		}
+		
 		return models;
 	}
 
 	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>): Promise<OpenAIEndpoint> {
-		const modelConfiguration = model.configuration?.models?.find(m => m.id === model.id);
-		const apiTypeOverride = modelConfiguration?.apiType ?? model.configuration?.apiType;
-		const url = resolveCustomEndpointUrl(model.id, model.url, apiTypeOverride);
-		const apiType: CustomEndpointApiType = apiTypeOverride ?? inferApiTypeFromUrl(url);
+		const explicitConfig = model.configuration?.models?.find(m => m.id === model.id);
+		const globalConfig = model.configuration?.global || {};
+		const modelConfiguration = { ...globalConfig, ...explicitConfig } as Partial<CustomEndpointModelConfig>;
+
+		let url = modelConfiguration.url || model.url;
+		let apiType: CustomEndpointApiType;
+		
+		if (hasExplicitApiPath(url)) {
+			apiType = inferApiTypeFromUrl(url);
+		} else {
+			const apiTypeOverride = modelConfiguration.apiType ?? model.configuration?.apiType;
+			url = resolveCustomEndpointUrl(model.id, url, apiTypeOverride);
+			apiType = apiTypeOverride ?? inferApiTypeFromUrl(url);
+		}
+
 		const modelCapabilities = {
-			maxInputTokens: model.maxInputTokens,
-			maxOutputTokens: model.maxOutputTokens,
-			contextWindow: modelConfiguration?.contextWindow,
-			toolCalling: !!model.capabilities?.toolCalling || false,
-			vision: !!model.capabilities?.imageInput || false,
-			name: model.name,
+			maxInputTokens: modelConfiguration.maxInputTokens ?? model.maxInputTokens,
+			maxOutputTokens: modelConfiguration.maxOutputTokens ?? model.maxOutputTokens,
+			contextWindow: modelConfiguration.contextWindow ?? modelConfiguration.maxTokens,
+			toolCalling: modelConfiguration.toolCalling ?? !!model.capabilities?.toolCalling ?? false,
+			vision: modelConfiguration.vision ?? !!model.capabilities?.imageInput ?? false,
+			name: modelConfiguration.name ?? model.name,
 			url,
-			thinking: modelConfiguration?.thinking ?? false,
-			streaming: modelConfiguration?.streaming,
-			requestHeaders: modelConfiguration?.requestHeaders,
-			modelOptions: modelConfiguration?.modelOptions,
-			zeroDataRetentionEnabled: modelConfiguration?.zeroDataRetentionEnabled,
-			supportsReasoningEffort: modelConfiguration?.supportsReasoningEffort,
-			reasoningEffortFormat: modelConfiguration?.reasoningEffortFormat
+			description: modelConfiguration.description,
+			icon: modelConfiguration.icon,
+			credits: modelConfiguration.credits,
+			thinking: modelConfiguration.thinking ?? false,
+			streaming: modelConfiguration.streaming,
+			requestHeaders: modelConfiguration.requestHeaders,
+			modelOptions: modelConfiguration.modelOptions,
+			zeroDataRetentionEnabled: modelConfiguration.zeroDataRetentionEnabled,
+			supportsReasoningEffort: modelConfiguration.supportsReasoningEffort,
+			reasoningEffortFormat: modelConfiguration.reasoningEffortFormat
 		};
 		const modelInfo = resolveModelInfo(model.id, this._name, undefined, modelCapabilities);
 		const supportedEndpoints = apiTypeToSupportedEndpoints(apiType);
