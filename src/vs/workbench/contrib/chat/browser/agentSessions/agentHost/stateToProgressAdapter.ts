@@ -29,7 +29,7 @@ import { type IQuotaSnapshot } from '../../../../../services/chat/common/chatEnt
 import { ChatToolInvocation } from '../../../common/model/chatProgressTypes/chatToolInvocation.js';
 import { type IChatRequestVariableData } from '../../../common/model/chatModel.js';
 import { AgentHostCompletionReferenceKind, restorePasteVariableEntryFromAttachment, toAgentHostCompletionVariableEntryFromMetadata, type IAgentFeedbackVariableEntry, type IChatRequestVariableEntry } from '../../../common/attachments/chatVariableEntries.js';
-import { type IToolConfirmationMessages, type IToolData, type IToolResult, type IToolResultInputOutputDetails, ToolDataSource, ToolInvocationPresentation } from '../../../common/tools/languageModelToolsService.js';
+import { type IToolConfirmationMessages, type IToolData, type IPreparedToolInvocation, type IToolResult, type IToolResultInputOutputDetails, ToolDataSource, ToolInvocationPresentation } from '../../../common/tools/languageModelToolsService.js';
 import { MCP } from '../../../../mcp/common/modelContextProtocol.js';
 import { basename } from '../../../../../../base/common/resources.js';
 import { hasKey, type Mutable } from '../../../../../../base/common/types.js';
@@ -863,7 +863,16 @@ export function activeTurnToProgress(sessionResource: URI, activeTurn: ActiveTur
 				const tc = rp.toolCall;
 				if (tc.status === ToolCallStatus.Completed || tc.status === ToolCallStatus.Cancelled) {
 					parts.push(completedToolCallToSerialized(tc as ICompletedToolCall, undefined, sessionResource, connectionAuthority));
-				} else if (tc.status === ToolCallStatus.Running || tc.status === ToolCallStatus.Streaming || tc.status === ToolCallStatus.PendingConfirmation) {
+				} else if (tc.status === ToolCallStatus.Streaming) {
+					// Reconnect snapshot of a tool still streaming its
+					// arguments: adopt a native streaming invocation so the live
+					// observer can drive it through `transitionFromStreaming`
+					// (single card). Using `toolCallStateToInvocation` here would
+					// yield an Executing placeholder that then triggers the
+					// duplicate-confirmation path on the subsequent
+					// `Streaming → PendingConfirmation` transition (#314858).
+					parts.push(toolCallStateToStreamingInvocation(tc, undefined));
+				} else if (tc.status === ToolCallStatus.Running || tc.status === ToolCallStatus.PendingConfirmation) {
 					parts.push(toolCallStateToInvocation(tc, undefined, sessionResource, connectionAuthority));
 				}
 				break;
@@ -1837,6 +1846,46 @@ export function toolCallStateToInvocation(tc: ToolCallState, subAgentInvocationI
 	}
 
 	return invocation;
+}
+
+/**
+ * Creates a {@link ChatToolInvocation} in the native streaming state for a
+ * tool call that is still streaming its arguments (AHP
+ * {@link ToolCallStatus.Streaming}). The invocation is later driven out of the
+ * streaming state via {@link ChatToolInvocation.transitionFromStreaming} once
+ * the tool reaches confirmation/running, so a single card represents the whole
+ * lifecycle instead of a settled placeholder plus a replacement.
+ */
+export function toolCallStateToStreamingInvocation(tc: ToolCallState, subAgentInvocationId: string | undefined): ChatToolInvocation {
+	return ChatToolInvocation.createStreaming({
+		toolCallId: tc.toolCallId,
+		toolId: tc.toolName,
+		toolData: {
+			id: tc.toolName,
+			source: ToolDataSource.Internal,
+			displayName: tc.displayName,
+			modelDescription: tc.toolName,
+		},
+		subagentInvocationId: subAgentInvocationId,
+	});
+}
+
+/**
+ * Extracts the {@link IPreparedToolInvocation} display fields for a tool-call
+ * state, reusing {@link toolCallStateToInvocation} so the confirmation,
+ * terminal, and other `toolSpecificData` logic stays in one place. Used to
+ * transition a streaming invocation into its confirmation/running presentation
+ * without allocating a second visible card.
+ */
+export function toolCallStateToPreparedInvocation(tc: ToolCallState, sessionResource: URI, connectionAuthority: string): IPreparedToolInvocation {
+	const built = toolCallStateToInvocation(tc, undefined, sessionResource, connectionAuthority);
+	return {
+		invocationMessage: built.invocationMessage,
+		pastTenseMessage: built.pastTenseMessage,
+		confirmationMessages: built.confirmationMessages,
+		presentation: built.presentation,
+		toolSpecificData: built.toolSpecificData,
+	};
 }
 
 /**
