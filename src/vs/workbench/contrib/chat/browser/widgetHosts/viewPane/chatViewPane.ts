@@ -1584,4 +1584,5 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 			$mid: MarshalledId.ChatViewContext
 		} : undefined;
 	}
+
 }
