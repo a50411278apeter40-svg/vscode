@@ -26,6 +26,7 @@ Then read the relevant spec for the area you are changing (see table below). If 
 
 ## Common Pitfalls
 
+- **Do not reimplement an existing picker for a second Agents-window surface**: extract its provider-agnostic trigger/list/focus/ARIA behavior into a shared `contrib/*` component, then keep provider or feature-specific state in thin adapters. This avoids interaction and accessibility drift while respecting the rule that non-provider contributions cannot import provider implementations.
 - **Wrong menu IDs**: Never use `MenuId.*` from `vs/platform/actions` for Agents window UI. Always use `Menus.*` from `browser/menus.ts`.
 - **Sessions menu ids must live in the shared menu registry**: Do not declare sessions-owned `new MenuId(...)` constants ad hoc inside individual parts. Add them to `browser/menus.ts` under `Menus` with discoverable `SessionsEditor...` names so ownership and reuse stay obvious.
 - **Events instead of observables**: Session state must flow through `IObservable`, not `Event`. Use `autorun`/`derived` for reactive UI, not `onDid*` event listeners.

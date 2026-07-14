@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { raceCancellationError } from '../../../../base/common/async.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationError } from '../../../../base/common/errors.js';
 import { Disposable, DisposableMap, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IObservable, observableValue } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -572,11 +575,14 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 	 * If the send or any configuration setter fails, the stranded draft is
 	 * disposed through its provider and the error is rethrown.
 	 */
-	async createAndSendNewChatRequest(folderUri: URI, options: ISendRequestOptions, createOptions?: ICreateNewSessionOptions): Promise<ISession | undefined> {
+	async createAndSendNewChatRequest(folderUri: URI, options: ISendRequestOptions, createOptions?: ICreateNewSessionOptions, token: CancellationToken = CancellationToken.None): Promise<ISession | undefined> {
 		const { provider, sessionTypeId } = this._resolveProviderForNewSession(folderUri, createOptions);
 		const session = provider.createNewSession(folderUri, sessionTypeId);
 
 		try {
+			if (token.isCancellationRequested) {
+				throw new CancellationError();
+			}
 			if (createOptions?.modelId) {
 				provider.setModel(session.sessionId, createOptions.modelId);
 			}
@@ -586,13 +592,26 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 			if (createOptions?.permissionLevel) {
 				provider.setPermissionLevel?.(session.sessionId, createOptions.permissionLevel);
 			}
-			if (createOptions?.isolationMode) {
-				provider.setIsolationMode?.(session.sessionId, createOptions.isolationMode);
-			}
-			if (createOptions?.branch) {
-				provider.setBranch?.(session.sessionId, createOptions.branch);
+			const supportsWorktreeConfiguration = provider.getSessionTypeCapabilities?.(sessionTypeId).supportsWorktreeConfiguration === true;
+			if (supportsWorktreeConfiguration && (createOptions?.isolationMode || createOptions?.branch)) {
+				if (provider.setRepositoryConfiguration) {
+					await raceCancellationError(Promise.resolve(provider.setRepositoryConfiguration(session.sessionId, {
+						isolationMode: createOptions.isolationMode,
+						branch: createOptions.branch,
+					})), token);
+				} else {
+					if (createOptions.isolationMode) {
+						await raceCancellationError(Promise.resolve(provider.setIsolationMode?.(session.sessionId, createOptions.isolationMode)), token);
+					}
+					if (createOptions.branch) {
+						await raceCancellationError(Promise.resolve(provider.setBranch?.(session.sessionId, createOptions.branch)), token);
+					}
+				}
 			}
 
+			if (token.isCancellationRequested) {
+				throw new CancellationError();
+			}
 			return await this._sendNewChatRequestInBackground(provider, session, options);
 		} catch (e) {
 			// The send never committed, so the draft is stranded. Dispose it

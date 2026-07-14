@@ -67,7 +67,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 			enabled: initial?.enabled ?? true,
 		};
 
-		const validation: IValidationState = { nameError: undefined, promptError: undefined, folderError: undefined };
+		const validation: IValidationState = { nameError: undefined, promptError: undefined, folderError: undefined, branchError: undefined };
 
 		let saveButton: IButton | undefined;
 		let revalidate: () => void = () => { };
@@ -75,6 +75,8 @@ export class AutomationDialogService implements IAutomationDialogService {
 		let getMode: () => string | undefined = () => initial?.mode;
 		let getPermissionLevel: () => string | undefined = () => initial?.permissionLevel;
 		let getModelId: () => string | undefined = () => initial?.modelId;
+		let getBranch: () => string | undefined = () => initial?.isolationMode === 'worktree' ? initial.branch : undefined;
+		let getFocusableElements: () => readonly HTMLElement[] = () => [];
 
 		const title = isEdit
 			? localize('automation.dialog.editTitle', "Edit automation")
@@ -95,6 +97,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 				extraClasses: ['automation-dialog'],
 				cancelId: 1,
 				isExternalFocusAllowed: isAutomationDialogPopupTarget,
+				getBodyFocusableElements: () => getFocusableElements(),
 				// textLinkForeground stamps inline styles onto chat input picker chips.
 				dialogStyles: { ...defaultDialogStyles, textLinkForeground: undefined },
 				buttonOptions: [
@@ -124,7 +127,9 @@ export class AutomationDialogService implements IAutomationDialogService {
 					getMode = handle.getMode;
 					getPermissionLevel = handle.getPermissionLevel;
 					getModelId = handle.getModelId;
-					revalidate = () => updateSaveButtonState(saveButton, state, validation, form, getPrompt);
+					getBranch = handle.getBranch;
+					getFocusableElements = handle.getFocusableElements;
+					revalidate = () => updateSaveButtonState(saveButton, state, validation, form, getPrompt, getBranch);
 					revalidate();
 				},
 			}, this.keybindingService, this.layoutService, this.hostService),
@@ -140,7 +145,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 			}
 			// Guard against submit-with-Enter bypassing live validation.
 			revalidate();
-			if (validation.nameError || validation.promptError || validation.folderError) {
+			if (validation.nameError || validation.promptError || validation.folderError || validation.branchError) {
 				return undefined;
 			}
 			if (!state.folderUri) {
@@ -158,6 +163,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 			const mode = getMode();
 			const permissionLevel = getPermissionLevel();
 			const modelId = getModelId();
+			const branch = getBranch();
 
 			if (isEdit && initial) {
 				const patch: IUpdateAutomationOptions = {
@@ -171,7 +177,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 					mode: mode ?? null,
 					permissionLevel: permissionLevel ?? null,
 					isolationMode: state.isolationMode ?? null,
-					branch: state.branch ?? null,
+					branch: branch ?? null,
 					enabled: state.enabled,
 				};
 				return { kind: 'update', id: initial.id, value: patch };
@@ -188,7 +194,7 @@ export class AutomationDialogService implements IAutomationDialogService {
 				mode,
 				permissionLevel,
 				isolationMode: state.isolationMode,
-				branch: state.branch,
+				branch,
 				enabled: state.enabled,
 			};
 			return { kind: 'create', value: create };

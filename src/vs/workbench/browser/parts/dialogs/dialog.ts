@@ -23,7 +23,20 @@ const defaultDialogAllowableCommands = new Set([
 	'editor.action.selectAll',
 	'editor.action.clipboardCopyAction',
 	'editor.action.clipboardCutAction',
-	'editor.action.clipboardPasteAction'
+	'editor.action.clipboardPasteAction',
+	'hideCodeActionWidget',
+	'clearFilterCodeActionWidget',
+	'selectPrevCodeAction',
+	'selectNextCodeAction',
+	'acceptSelectedCodeAction',
+	'previewSelectedCodeAction',
+	'toggleSectionCodeAction',
+	'collapseSectionCodeAction',
+	'expandSectionCodeAction',
+	'quickInput.next',
+	'quickInput.previous',
+	'quickInput.accept',
+	'quickInput.hide'
 ]);
 
 export function createWorkbenchDialogOptions(options: Partial<IDialogOptions>, keybindingService: IKeybindingService, layoutService: ILayoutService, hostService: IHostService, allowableCommands = defaultDialogAllowableCommands): IDialogOptions {
@@ -65,4 +78,3 @@ export function createBrowserAboutDialogDetails(productService: IProductService)
 		detailsToCopy: detailsToCopy
 	};
 }
-

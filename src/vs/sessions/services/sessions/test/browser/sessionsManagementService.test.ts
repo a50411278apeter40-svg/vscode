@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { DeferredPromise } from '../../../../../base/common/async.js';
+import { CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { autorun, constObservable, observableValue } from '../../../../../base/common/observable.js';
 import { extUriBiasedIgnorePathCase } from '../../../../../base/common/resources.js';
@@ -25,7 +27,7 @@ import { IChatWidgetHistoryService } from '../../../../../workbench/contrib/chat
 import { PreferredGroup } from '../../../../../workbench/services/editor/common/editorService.js';
 import { ChatInteractivity, IChat, ISession, ISessionType, ISessionWorkspace, SessionStatus } from '../../common/session.js';
 import { ILanguageModelChatMetadataAndIdentifier } from '../../../../../workbench/contrib/chat/common/languageModels.js';
-import { ISessionChangeEvent, ISendRequestOptions, ISessionModelPickerOptions, ISessionsProvider } from '../../common/sessionsProvider.js';
+import { ISessionChangeEvent, ISendRequestOptions, ISessionModelPickerOptions, ISessionRepositoryConfiguration, ISessionsProvider, ISessionTypeCapabilities } from '../../common/sessionsProvider.js';
 import { SessionsManagementService } from '../../browser/sessionsManagementService.js';
 import { ISessionsManagementService, ICreateNewSessionOptions } from '../../common/sessionsManagement.js';
 import { SessionsService } from '../../browser/sessionsService.js';
@@ -146,6 +148,7 @@ class TestSessionsProvider extends mock<ISessionsProvider>() {
 	override resolveWorkspace(): ISessionWorkspace | undefined { return undefined; }
 	override createNewSession(): ISession { return this._session; }
 	override getSessionTypes(): ISessionType[] { return [...this.sessionTypes]; }
+	override getSessionTypeCapabilities(): ISessionTypeCapabilities { return { supportsWorktreeConfiguration: true }; }
 	override async renameChat(): Promise<void> { }
 	override getModels(): readonly ILanguageModelChatMetadataAndIdentifier[] { return []; }
 	override getModelPickerOptions(): ISessionModelPickerOptions { return { useGroupedModelPicker: true, showFeatured: true, showUnavailableFeatured: false, showManageModelsAction: false }; }
@@ -866,6 +869,158 @@ suite('SessionsManagementService', () => {
 			'setIsolationMode:worktree',
 			'setBranch:main',
 		]);
+	});
+
+	test('createAndSendNewChatRequest awaits asynchronous repository configuration setters', async () => {
+		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
+		const session = stubSession({
+			sessionId: 's1',
+			providerId: 'test',
+			chats: constObservable([chat]),
+			mainChat: constObservable(chat),
+		});
+		const isolationDone = new DeferredPromise<void>();
+		const branchStarted = new DeferredPromise<void>();
+		const branchDone = new DeferredPromise<void>();
+		const calls: string[] = [];
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return { folderUri: URI.parse('test:///folder') } as unknown as ISessionWorkspace; }
+			override async setIsolationMode(): Promise<void> {
+				calls.push('isolation:start');
+				await isolationDone.p;
+				calls.push('isolation:end');
+			}
+			override async setBranch(): Promise<void> {
+				calls.push('branch:start');
+				await branchStarted.complete();
+				await branchDone.p;
+				calls.push('branch:end');
+			}
+			override async sendRequest(): Promise<ISession> {
+				calls.push('send');
+				return session;
+			}
+		}(session);
+		const { service } = createSessionsManagementService(session, disposables, provider);
+
+		const request = service.createAndSendNewChatRequest(URI.parse('test:///folder'), { query: 'hi' }, {
+			isolationMode: 'worktree',
+			branch: 'main',
+		});
+		await Promise.resolve();
+		assert.deepStrictEqual(calls, ['isolation:start']);
+
+		await isolationDone.complete();
+		await branchStarted.p;
+		assert.deepStrictEqual(calls, ['isolation:start', 'isolation:end', 'branch:start']);
+
+		await branchDone.complete();
+		await request;
+		assert.deepStrictEqual(calls, ['isolation:start', 'isolation:end', 'branch:start', 'branch:end', 'send']);
+	});
+
+	test('createAndSendNewChatRequest prefers and awaits atomic repository configuration', async () => {
+		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
+		const session = stubSession({
+			sessionId: 's1',
+			providerId: 'test',
+			chats: constObservable([chat]),
+			mainChat: constObservable(chat),
+		});
+		const configurationDone = new DeferredPromise<void>();
+		const calls: Array<string | ISessionRepositoryConfiguration> = [];
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return { folderUri: URI.parse('test:///folder') } as unknown as ISessionWorkspace; }
+			override async setRepositoryConfiguration(_sessionId: string, configuration: ISessionRepositoryConfiguration): Promise<void> {
+				calls.push(configuration);
+				await configurationDone.p;
+			}
+			override setIsolationMode(): never { throw new Error('individual isolation setter should not be called'); }
+			override setBranch(): never { throw new Error('individual branch setter should not be called'); }
+			override async sendRequest(): Promise<ISession> {
+				calls.push('send');
+				return session;
+			}
+		}(session);
+		const { service } = createSessionsManagementService(session, disposables, provider);
+
+		const request = service.createAndSendNewChatRequest(URI.parse('test:///folder'), { query: 'hi' }, {
+			isolationMode: 'worktree',
+			branch: 'main',
+		});
+		await Promise.resolve();
+		assert.deepStrictEqual(calls, [{ isolationMode: 'worktree', branch: 'main' }]);
+
+		await configurationDone.complete();
+		await request;
+		assert.deepStrictEqual(calls, [{ isolationMode: 'worktree', branch: 'main' }, 'send']);
+	});
+
+	test('createAndSendNewChatRequest cancels pending repository configuration and disposes the draft', async () => {
+		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
+		const session = stubSession({
+			sessionId: 's1',
+			providerId: 'test',
+			chats: constObservable([chat]),
+			mainChat: constObservable(chat),
+		});
+		const configurationDone = new DeferredPromise<void>();
+		let deleted = false;
+		let sent = false;
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return { folderUri: URI.parse('test:///folder') } as unknown as ISessionWorkspace; }
+			override async setRepositoryConfiguration(): Promise<void> {
+				await configurationDone.p;
+			}
+			override deleteNewSession(): void {
+				deleted = true;
+			}
+			override async sendRequest(): Promise<ISession> {
+				sent = true;
+				return session;
+			}
+		}(session);
+		const { service } = createSessionsManagementService(session, disposables, provider);
+		const cts = disposables.add(new CancellationTokenSource());
+
+		const request = service.createAndSendNewChatRequest(URI.parse('test:///folder'), { query: 'hi' }, {
+			isolationMode: 'worktree',
+			branch: 'main',
+		}, cts.token);
+		await Promise.resolve();
+		cts.cancel();
+
+		await assert.rejects(request, /Canceled/);
+		assert.deepStrictEqual({ deleted, sent }, { deleted: true, sent: false });
+		await configurationDone.complete();
+	});
+
+	test('createAndSendNewChatRequest skips repository configuration for unsupported session types', async () => {
+		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
+		const session = stubSession({
+			sessionId: 's1',
+			providerId: 'test',
+			chats: constObservable([chat]),
+			mainChat: constObservable(chat),
+		});
+		let sent = false;
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return { folderUri: URI.parse('test:///folder') } as unknown as ISessionWorkspace; }
+			override getSessionTypeCapabilities(): { supportsWorktreeConfiguration: false } { return { supportsWorktreeConfiguration: false }; }
+			override setRepositoryConfiguration(): never { throw new Error('repository configuration should not be called'); }
+			override async sendRequest(): Promise<ISession> {
+				sent = true;
+				return session;
+			}
+		}(session);
+		const { service } = createSessionsManagementService(session, disposables, provider);
+
+		await service.createAndSendNewChatRequest(URI.parse('test:///folder'), { query: 'hi' }, {
+			isolationMode: 'workspace',
+			branch: 'legacy-branch',
+		});
+
+		assert.strictEqual(sent, true);
 	});
 
 	test('createAndSendNewChatRequest disposes stranded draft when a setter throws', async () => {

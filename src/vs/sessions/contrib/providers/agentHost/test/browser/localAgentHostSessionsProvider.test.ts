@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
-import { DeferredPromise, timeout } from '../../../../../../base/common/async.js';
+import { DeferredPromise, raceTimeout, timeout } from '../../../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { DisposableStore, ImmortalReference, toDisposable, type IReference } from '../../../../../../base/common/lifecycle.js';
 import { autorun, constObservable, ISettableObservable, observableValue, type IObservable } from '../../../../../../base/common/observable.js';
@@ -74,6 +74,7 @@ class MockAgentHostService extends mock<IAgentHostService>() {
 	public failResolveSessionConfig = false;
 	public resolveSessionConfigResult: ResolveSessionConfigResult = { schema: { type: 'object', properties: {} }, values: { isolation: 'worktree' } };
 	public resolveSessionConfigRequests: { config?: Record<string, unknown> }[] = [];
+	public resolveSessionConfigBarrier: DeferredPromise<void> | undefined;
 
 	private readonly _authenticationPending: ISettableObservable<boolean> = observableValue('authenticationPending', false);
 	override readonly authenticationPending: IObservable<boolean> = this._authenticationPending;
@@ -175,6 +176,7 @@ class MockAgentHostService extends mock<IAgentHostService>() {
 
 	override async resolveSessionConfig(request: { config?: Record<string, unknown> }): Promise<ResolveSessionConfigResult> {
 		this.resolveSessionConfigRequests.push(request);
+		await this.resolveSessionConfigBarrier?.p;
 		await Promise.resolve();
 		if (this.failResolveSessionConfig) {
 			throw new Error('resolveSessionConfig unavailable');
@@ -1995,6 +1997,106 @@ suite('LocalAgentHostSessionsProvider', () => {
 			storageService.getObject(STORAGE_KEY_REMEMBERED_SESSION_CONFIG_VALUES, StorageScope.PROFILE, {}),
 			{ [SessionConfigKey.Isolation]: 'folder' },
 		);
+	});
+
+	test('maps generic automation repository configuration to agent-host config', async () => {
+		const storageService = disposables.add(new InMemoryStorageService());
+		const provider = createProvider(disposables, agentHost, undefined, { storageService });
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		await timeout(0);
+		const firstAutomationRequest = agentHost.resolveSessionConfigRequests.length;
+
+		agentHost.resolveSessionConfigResult = {
+			schema: { type: 'object', properties: {} },
+			values: { isolation: 'folder', branch: 'feature/automation' },
+		};
+		await provider.setRepositoryConfiguration(session.sessionId, {
+			isolationMode: 'workspace',
+			branch: 'feature/automation',
+		});
+
+		assert.deepStrictEqual({
+			capabilities: provider.getSessionTypeCapabilities(provider.sessionTypes[0].id),
+			requests: agentHost.resolveSessionConfigRequests.slice(firstAutomationRequest).map(request => request.config),
+			remembered: storageService.getObject(STORAGE_KEY_REMEMBERED_SESSION_CONFIG_VALUES, StorageScope.PROFILE, {}),
+		}, {
+			capabilities: { supportsWorktreeConfiguration: true },
+			requests: [
+				{ isolation: 'folder', branch: 'feature/automation' },
+			],
+			remembered: {},
+		});
+	});
+
+	test('rejects automation repository configuration when agent-host resolution fails', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		await timeout(0);
+		agentHost.failResolveSessionConfig = true;
+
+		await assert.rejects(() => provider.setRepositoryConfiguration(session.sessionId, {
+			isolationMode: 'worktree',
+			branch: 'feature/automation',
+		}), /resolveSessionConfig unavailable/);
+		assert.strictEqual(provider.getCreateSessionConfig(session.sessionId), undefined);
+	});
+
+	test('rejects repository configuration when the final resolve changes another requested value', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		await timeout(0);
+		agentHost.resolveSessionConfigResult = {
+			schema: { type: 'object', properties: {} },
+			values: { isolation: 'folder', branch: 'feature/automation' },
+		};
+
+		await assert.rejects(() => provider.setRepositoryConfiguration(session.sessionId, {
+			isolationMode: 'worktree',
+			branch: 'feature/automation',
+		}), /did not apply session config 'isolation'/);
+	});
+
+	test('cancels repository configuration when the draft is disposed during initial resolve', async () => {
+		const barrier = agentHost.resolveSessionConfigBarrier = new DeferredPromise<void>();
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		const setting = provider.setRepositoryConfiguration(session.sessionId, {
+			isolationMode: 'worktree',
+			branch: 'feature/automation',
+		});
+		await Promise.resolve();
+		provider.deleteNewSession(session.sessionId);
+
+		try {
+			await assert.rejects(raceTimeout(setting, 100), /Canceled/);
+		} finally {
+			await barrier.complete();
+		}
+	});
+
+	test('waits for authentication and startup config resolution before repository configuration', async () => {
+		agentHost.setAuthenticationPending(true);
+		const provider = createProvider(disposables, agentHost);
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		agentHost.resolveSessionConfigResult = {
+			schema: { type: 'object', properties: {} },
+			values: { isolation: 'worktree', branch: 'feature/automation' },
+		};
+
+		const setting = provider.setRepositoryConfiguration(session.sessionId, {
+			isolationMode: 'worktree',
+			branch: 'feature/automation',
+		});
+		await Promise.resolve();
+		assert.strictEqual(agentHost.resolveSessionConfigRequests.length, 0);
+
+		agentHost.setAuthenticationPending(false);
+		await setting;
+
+		assert.deepStrictEqual(agentHost.resolveSessionConfigRequests.map(request => request.config), [
+			{},
+			{ isolation: 'worktree', branch: 'feature/automation' },
+		]);
 	});
 
 	test('setSessionConfigValue clamps autoApprove to default when policy disables global auto-approve', async () => {
