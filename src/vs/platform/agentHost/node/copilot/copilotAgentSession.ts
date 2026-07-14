@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CopilotSession, ExitPlanModeRequest, MessageOptions, PermissionRequestResult, SessionConfig, Tool, ToolResultObject, McpServerStatus as SdkMcpServerStatus } from '@github/copilot-sdk';
-import { DeferredPromise } from '../../../../base/common/async.js';
+import type { CopilotSession, ExitPlanModeRequest, MessageOptions, PermissionAllowAllMode, PermissionAutoApproval, PermissionRequestResult, SessionConfig, Tool, ToolResultObject, McpServerStatus as SdkMcpServerStatus } from '@github/copilot-sdk';
+import { DeferredPromise, Sequencer } from '../../../../base/common/async.js';
 import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { CancellationError, getErrorMessage } from '../../../../base/common/errors.js';
@@ -39,7 +39,7 @@ import { isAgentFeedbackAnnotationsAttachment, renderAgentFeedbackAnnotationsAtt
 import { ISessionDatabase, ISessionDataService, SESSION_ATTACHMENTS_DIRNAME } from '../../common/sessionDataService.js';
 import { MessageAttachmentKind, ToolCallContributorKind, type FileEdit, type MessageAttachment } from '../../common/state/protocol/state.js';
 import { ActionType, isChatAction, type ChatAction, type SessionAction } from '../../common/state/sessionActions.js';
-import { MessageKind, ResponsePartKind, ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, ChatInputResponseKind, ToolCallConfirmationReason, ToolCallStatus, ToolResultContentType, buildSubagentSessionUri, getToolSubagentContent, isSubagentSession, type PendingMessage, type ChatInputAnswer, type ChatInputOption, type ChatInputQuestion, type ChatInputRequest, type ToolCallResult, type ToolResultContent, type Turn, type UsageInfo, type UsageInfoMeta } from '../../common/state/sessionState.js';
+import { MessageKind, ResponsePartKind, ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, ChatInputResponseKind, ToolCallConfirmationReason, ToolCallRiskAssessmentKind, ToolCallRiskAssessmentStatus, ToolCallStatus, ToolResultContentType, buildSubagentSessionUri, getToolSubagentContent, isSubagentSession, type PendingMessage, type ChatInputAnswer, type ChatInputOption, type ChatInputQuestion, type ChatInputRequest, type ToolCallResult, type ToolResultContent, type Turn, type UsageInfo, type UsageInfoMeta } from '../../common/state/sessionState.js';
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
 import type { IExitPlanModeResponse } from './copilotAgent.js';
 import { CopilotSessionWrapper } from './copilotSessionWrapper.js';
@@ -125,12 +125,12 @@ function getPlanActionDescription(actionId: string): { label: string; descriptio
 		case 'autopilot':
 			return {
 				label: localize('agentHost.planReview.autopilot.label', "Implement with Autopilot"),
-				description: localize('agentHost.planReview.autopilot.description', "Auto-approve all tool calls and continue until done."),
+				description: localize('agentHost.planReview.autopilot.description', "Continue autonomously until done, using the selected approval level."),
 			};
 		case 'autopilot_fleet':
 			return {
 				label: localize('agentHost.planReview.autopilotFleet.label', "Implement with Autopilot Fleet"),
-				description: localize('agentHost.planReview.autopilotFleet.description', "Auto-approve all tool calls, including fleet management actions, and continue until done."),
+				description: localize('agentHost.planReview.autopilotFleet.description', "Continue autonomously with fleet management, using the selected approval level."),
 			};
 		case 'interactive':
 			return {
@@ -496,6 +496,8 @@ export class CopilotAgentSession extends Disposable {
 	 * cleared on turn boundaries.
 	 */
 	private readonly _parentToolCallIdsByAgentId = new Map<string, string>();
+	private readonly _autoApprovals = new Map<string, PermissionAutoApproval | null>();
+	private readonly _pendingAutoApprovals = new Map<string, DeferredPromise<PermissionAutoApproval | undefined>>();
 	/** Pending permission requests awaiting a renderer-side decision. */
 	private readonly _pendingPermissions = new Map<string, DeferredPromise<boolean>>();
 	/** Pending user input requests awaiting a renderer-side answer. */
@@ -566,6 +568,9 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _slashCommandProvider: CopilotSlashCommandProvider;
 	/** Last agent mode pushed to the SDK via {@link applyMode}, to elide redundant `rpc.mode.set` calls. */
 	private _lastAppliedMode: CopilotSdkMode | undefined;
+	private _lastAppliedPermissionMode: PermissionAllowAllMode | undefined;
+	private _autoApprovalExperimentalModeEnabled = false;
+	private readonly _permissionModeSequencer = new Sequencer();
 	private readonly _steeringMessagesInFlight = new Set<string>();
 	/**
 	 * Steering messages that have been accepted by the SDK but not yet
@@ -723,6 +728,13 @@ export class CopilotAgentSession extends Disposable {
 			}));
 		}
 		this._register(toDisposable(() => this._cancelPendingClientToolCalls()));
+		this._register(toDisposable(() => this._autoApprovals.clear()));
+		this._register(toDisposable(() => {
+			for (const pending of this._pendingAutoApprovals.values()) {
+				pending.complete(undefined);
+			}
+			this._pendingAutoApprovals.clear();
+		}));
 	}
 
 	// ---- AgentSignal helpers ------------------------------------------------
@@ -1335,6 +1347,7 @@ export class CopilotAgentSession extends Disposable {
 		}
 
 		await this.applyMode(mode);
+		await this.syncPermissionMode('turn-start');
 		await this._applyEffectiveSandboxConfig();
 		await this._wrapper.session.send({ prompt, attachments: sdkAttachments?.length ? sdkAttachments : undefined });
 		this._logService.info(`[Copilot:${this.sessionId}] session.send() returned`);
@@ -1765,14 +1778,20 @@ export class CopilotAgentSession extends Disposable {
 	private async _handlePermissionRequest(
 		request: ITypedPermissionRequest,
 	): Promise<PermissionRequestResult> {
-		this._logService.info(`[Copilot:${this.sessionId}] Permission request: kind=${request.kind}`);
-
 		try {
 			const toolCallId = request.toolCallId;
 			if (!toolCallId) {
 				// TODO: handle permission requests without a toolCallId by creating a synthetic tool call
 				this._logService.warn(`[Copilot:${this.sessionId}] Permission request without toolCallId, auto-denying: kind=${request.kind}`);
 				return { kind: 'reject' };
+			}
+
+			const autoApproval = this._lastAppliedPermissionMode === 'auto'
+				? await this._takeAutoApproval(toolCallId)
+				: undefined;
+			const recommendation = autoApproval?.recommendation;
+			if (recommendation === 'approve' && !request.requestSandboxBypass) {
+				return { kind: 'approve-once' };
 			}
 
 			const sessionResourcePath = this._getInternalSessionResourcePath(request);
@@ -1881,6 +1900,14 @@ export class CopilotAgentSession extends Disposable {
 					invocationMessage,
 					toolInput,
 					confirmationTitle,
+					riskAssessment: recommendation !== 'approve' && autoApproval?.reason
+						? {
+							kind: ToolCallRiskAssessmentKind.Judge,
+							status: ToolCallRiskAssessmentStatus.Complete,
+							reason: autoApproval.reason,
+							safety: 0,
+						}
+						: undefined,
 					edits,
 				},
 				permissionKind,
@@ -1985,21 +2012,81 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	/**
-	 * `true` when the session runs with bypass approvals — the global
-	 * auto-approve setting, the session's `autoApprove` ("Bypass Approvals")
-	 * level, or `autopilot` mode (which runs autonomously with no user to
-	 * confirm and therefore implies a disabled sandbox). The sandbox enable
-	 * setting only applies under default approvals, so the sandbox is disabled
-	 * for the request when this is `true`.
+	 * `true` when the session runs with bypass approvals — either the global
+	 * auto-approve setting or the session's `autoApprove` ("Allow All")
+	 * level. Agent mode is an orthogonal axis and does not affect approvals.
 	 */
 	private _isBypassApprovals(): boolean {
 		if (this._configurationService.getRootValue(platformRootSchema, AgentHostGlobalAutoApproveEnabledConfigKey) === true) {
 			return true;
 		}
-		if (this._isAutopilotMode()) {
-			return true;
-		}
 		return this._configurationService.getEffectiveValue(this.sessionUri.toString(), platformSessionSchema, SessionConfigKey.AutoApprove) === 'autoApprove';
+	}
+
+	private _getSdkPermissionMode(): PermissionAllowAllMode {
+		if (this._isBypassApprovals()) {
+			return 'on';
+		}
+		return this._getConfiguredApprovalLevel() === 'assisted'
+			? 'auto'
+			: 'off';
+	}
+
+	private _getConfiguredApprovalLevel(): string {
+		return this._configurationService.getEffectiveValue(this.sessionUri.toString(), platformSessionSchema, SessionConfigKey.AutoApprove) ?? 'default';
+	}
+
+	private _getConfiguredAgentMode(): string {
+		return this._configurationService.getEffectiveValue(this.sessionUri.toString(), platformSessionSchema, SessionConfigKey.Mode) ?? 'interactive';
+	}
+
+	private async _takeAutoApproval(toolCallId: string): Promise<PermissionAutoApproval | undefined> {
+		if (this._autoApprovals.has(toolCallId)) {
+			const autoApproval = this._autoApprovals.get(toolCallId) ?? undefined;
+			this._autoApprovals.delete(toolCallId);
+			return autoApproval;
+		}
+		const pending = new DeferredPromise<PermissionAutoApproval | undefined>();
+		this._pendingAutoApprovals.set(toolCallId, pending);
+		try {
+			return await pending.p;
+		} finally {
+			this._pendingAutoApprovals.delete(toolCallId);
+		}
+	}
+
+	private _recordAutoApproval(toolCallId: string, autoApproval: PermissionAutoApproval | undefined): void {
+		const pending = this._pendingAutoApprovals.get(toolCallId);
+		if (pending) {
+			pending.complete(autoApproval);
+			return;
+		}
+		this._autoApprovals.set(toolCallId, autoApproval ?? null);
+	}
+
+	syncPermissionMode(source: 'config-change' | 'turn-start'): Promise<void> {
+		return this._permissionModeSequencer.queue(async () => {
+			const mode = this._getSdkPermissionMode();
+			const configuredLevel = this._getConfiguredApprovalLevel();
+			this._logService.info(`[Copilot:${this.sessionId}] Syncing permission mode: source=${source}, agentMode=${this._getConfiguredAgentMode()}, configuredLevel=${configuredLevel}, sdkMode=${mode}, previousSdkMode=${this._lastAppliedPermissionMode ?? 'unknown'}, globalAutoApprove=${this._configurationService.getRootValue(platformRootSchema, AgentHostGlobalAutoApproveEnabledConfigKey) === true}`);
+			const experimentalModeEnabled = mode === 'auto';
+			if (this._autoApprovalExperimentalModeEnabled !== experimentalModeEnabled) {
+				const experimentalResult = await this._wrapper.session.rpc.options.update({ isExperimentalMode: experimentalModeEnabled });
+				if (!experimentalResult.success) {
+					throw new Error(`Copilot SDK rejected experimental mode update required by permission mode '${mode}'`);
+				}
+				this._autoApprovalExperimentalModeEnabled = experimentalModeEnabled;
+				this._logService.info(`[Copilot:${this.sessionId}] ${experimentalModeEnabled ? 'Enabled' : 'Disabled'} SDK experimental mode for permission mode '${mode}'`);
+			}
+			if (this._lastAppliedPermissionMode === mode) {
+				return;
+			}
+			const result = await this._wrapper.session.rpc.permissions.setAllowAll({ mode });
+			if (!result.success || (result.mode !== undefined && result.mode !== mode)) {
+				throw new Error(`Copilot SDK rejected permission mode '${mode}'`);
+			}
+			this._lastAppliedPermissionMode = mode;
+		});
 	}
 
 	/**
@@ -2009,9 +2096,9 @@ export class CopilotAgentSession extends Disposable {
 	 * (the host's own terminal sandbox engine handles containment and the SDK's
 	 * built-in shell is unused). Otherwise it always pushes the effective state
 	 * so the SDK never retains a stale or auto-discovered sandbox: the
-	 * configured policy under default approvals, or an explicitly disabled
-	 * sandbox when the request runs with bypass approvals or no sandbox is
-	 * configured (setting off, or Windows).
+	 * configured policy unless the request runs with bypass approvals, or an
+	 * explicitly disabled sandbox when no sandbox is configured (setting off,
+	 * or Windows).
 	 */
 	private async _applyEffectiveSandboxConfig(): Promise<void> {
 		if (this._isCustomTerminalToolEnabled()) {
@@ -2408,7 +2495,7 @@ export class CopilotAgentSession extends Disposable {
 		return {
 			approved: true,
 			selectedAction,
-			...(isAutopilot ? { autoApproveEdits: true } : {}),
+			...(isAutopilot && this._isBypassApprovals() ? { autoApproveEdits: true } : {}),
 		};
 	}
 
@@ -2604,6 +2691,13 @@ export class CopilotAgentSession extends Disposable {
 			}, parentToolCallId);
 		}));
 
+		this._register(wrapper.onPermissionRequested(e => {
+			const toolCallId = e.data.permissionRequest.toolCallId;
+			if (toolCallId) {
+				this._recordAutoApproval(toolCallId, e.data.promptRequest?.autoApproval);
+			}
+		}));
+
 		this._register(wrapper.onToolStart(e => {
 			if (isHiddenTool(e.data.toolName)) {
 				this._logService.trace(`[Copilot:${sessionId}] Tool started (hidden): ${e.data.toolName}`);
@@ -2757,6 +2851,8 @@ export class CopilotAgentSession extends Disposable {
 			}
 			this._logService.info(`[Copilot:${sessionId}] Tool completed: ${e.data.toolCallId}`);
 			this._activeToolCalls.delete(e.data.toolCallId);
+			this._autoApprovals.delete(e.data.toolCallId);
+			this._pendingAutoApprovals.get(e.data.toolCallId)?.complete(undefined);
 			const displayName = tracked.displayName;
 			const toolOutput = e.data.error?.message ?? e.data.result?.content;
 
@@ -3368,7 +3464,6 @@ export class CopilotAgentSession extends Disposable {
 			label: option.label,
 			...(option.description ? { description: option.description } : {}),
 			...(option.recommended ? { default: true } : {}),
-			...(option.id === 'autopilot' || option.id === 'autopilot_fleet' ? { permissionLevel: 'autopilot' } : {}),
 		}));
 
 		const inputRequest: ChatInputRequestWithPlanReview = {

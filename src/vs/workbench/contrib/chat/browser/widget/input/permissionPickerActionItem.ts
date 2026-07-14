@@ -91,6 +91,16 @@ interface IPermissionLevelMeta {
 
 function getPermissionLevelMeta(level: ChatPermissionLevel): IPermissionLevelMeta {
 	switch (level) {
+		case ChatPermissionLevel.Assisted:
+			return {
+				id: 'chat.permissions.assisted',
+				label: localize('permissions.assisted', "Auto Approvals"),
+				shortLabel: localize('permissions.assisted.label', "Auto Approvals"),
+				detail: localize('permissions.assisted.subtext', "Evaluates risk before running tools"),
+				icon: ThemeIcon.fromId(Codicon.sparkle.id),
+				description: localize('permissions.assisted.description', "An LLM judge evaluates each tool call. Tools it doesn't approve require your approval."),
+				elevated: true,
+			};
 		case ChatPermissionLevel.AutoApprove:
 			return {
 				id: 'chat.permissions.autoApprove',
@@ -228,7 +238,10 @@ export class PermissionPickerActionItem extends ChatInputPickerActionViewItem {
 						},
 						run: async () => {
 							// Elevated levels show a one-time confirmation warning.
-							if (meta.elevated && !await maybeConfirmElevatedPermissionLevel(level, this.dialogService, storageService, { defaultSettingKey: delegate.defaultSettingKey })) {
+							if (meta.elevated && !await maybeConfirmElevatedPermissionLevel(level, this.dialogService, storageService, {
+								defaultSettingKey: delegate.defaultSettingKey,
+								levelLabel: meta.label,
+							})) {
 								return;
 							}
 							delegate.setPermissionLevel(level);
@@ -317,7 +330,7 @@ export class PermissionPickerActionItem extends ChatInputPickerActionViewItem {
 		labelElements.push(dom.$('span.chat-input-picker-label', undefined, label));
 
 		dom.reset(element, ...labelElements);
-		element.classList.toggle('warning', !ext && level === ChatPermissionLevel.Autopilot);
+		element.classList.toggle('warning', !ext && (level === ChatPermissionLevel.Autopilot || level === ChatPermissionLevel.Assisted));
 		element.classList.toggle('info', !ext && level === ChatPermissionLevel.AutoApprove);
 
 		this._currentTooltip = tooltip;

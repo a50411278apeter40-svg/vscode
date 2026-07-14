@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CopilotClient, CopilotClientOptions, CopilotSession, GitHubTelemetryNotification, ModelInfo, SessionEvent, SessionEventHandler, SessionEventPayload, SessionEventType, TypedSessionEventHandler } from '@github/copilot-sdk';
+import type { CopilotClient, CopilotClientOptions, CopilotSession, GitHubTelemetryNotification, ModelInfo, PermissionAllowAllMode, SessionEvent, SessionEventHandler, SessionEventPayload, SessionEventType, TypedSessionEventHandler } from '@github/copilot-sdk';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CCAModel } from '@vscode/copilot-api';
 import assert from 'assert';
@@ -32,11 +32,12 @@ import { ITelemetryService } from '../../../telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../../telemetry/common/telemetryUtils.js';
 import { AgentHostTelemetryService } from '../../node/agentHostTelemetryService.js';
 import { CopilotCliConfigKey } from '../../common/copilotCliConfig.js';
-import { AgentHostPreferLongContextEnabledConfigKey } from '../../common/agentHostSchema.js';
+import { AgentHostGlobalAutoApproveEnabledConfigKey, AgentHostPreferLongContextEnabledConfigKey, platformSessionSchema } from '../../common/agentHostSchema.js';
 import { IAgentPluginManager, ISyncedCustomization } from '../../common/agentPluginManager.js';
 import { AgentSession, GITHUB_COPILOT_PROTECTED_RESOURCE, type AgentSignal, type IAgentCreateChatForkSource, type IAgentSessionMetadata, type IAgentSpawnChatEvent } from '../../common/agentService.js';
 import { ISessionDataService } from '../../common/sessionDataService.js';
-import { buildDefaultChatUri, buildChatUri, buildSubagentChatUri, parseRequiredSessionUriFromChatUri, CustomizationLoadStatus, ResponsePartKind, ToolResultContentType, customizationId, type ClientPluginCustomization, type PluginCustomization, type ToolCallResult, type Turn, RuleCustomization } from '../../common/state/sessionState.js';
+import { buildDefaultChatUri, buildChatUri, buildSubagentChatUri, parseRequiredSessionUriFromChatUri, CustomizationLoadStatus, ResponsePartKind, SessionStatus, ToolResultContentType, customizationId, type ClientPluginCustomization, type PluginCustomization, type ToolCallResult, type Turn, RuleCustomization } from '../../common/state/sessionState.js';
+import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
 import { CustomizationType, ToolCallContributorKind, type AgentSelection, type ModelSelection, type ToolDefinition } from '../../common/state/protocol/state.js';
 import { ActionType, type ChatAction, type SessionAction } from '../../common/state/sessionActions.js';
 
@@ -402,6 +403,14 @@ interface IFakeAgentSession {
 
 class MockCopilotSession {
 	readonly sessionId = 'test-session-1';
+	readonly rpc = {
+		options: {
+			update: async () => ({ success: true }),
+		},
+		permissions: {
+			setAllowAll: async ({ mode }: { mode: PermissionAllowAllMode }) => ({ success: true, mode }),
+		},
+	};
 	private readonly _handlers = new Set<SessionEventHandler>();
 	private readonly _typedHandlers = new Map<SessionEventType, Set<(event: SessionEventPayload<SessionEventType>) => void>>();
 
@@ -576,7 +585,7 @@ function getCreatedClientOptions(agent: CopilotAgent): readonly CopilotClientOpt
 	return agent.createdClientOptions;
 }
 
-function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService }): { agent: CopilotAgent; instantiationService: IInstantiationService; configurationService: IAgentConfigurationService; fileService: FileService } {
+function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService }): { agent: CopilotAgent; instantiationService: IInstantiationService; configurationService: IAgentConfigurationService; fileService: FileService; stateManager: AgentHostStateManager } {
 	const services = new ServiceCollection();
 	const logService = options?.logService ?? new NullLogService();
 	const fileService = options?.fileService ?? disposables.add(new FileService(logService));
@@ -615,7 +624,7 @@ function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, optio
 	const agent = options?.copilotClient
 		? instantiationService.createInstance(options.useRealResumePath ? ResumePathCopilotAgent : TestableCopilotAgent, options.copilotClient)
 		: instantiationService.createInstance(CopilotAgent);
-	return { agent, instantiationService, configurationService: configService, fileService };
+	return { agent, instantiationService, configurationService: configService, fileService, stateManager };
 }
 
 function createTestAgent(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService }): CopilotAgent {
@@ -1530,6 +1539,92 @@ suite('CopilotAgent', () => {
 				await Promise.resolve();
 
 				assert.strictEqual(client.stopCount, 0);
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+	});
+
+	suite('live permission config changes', () => {
+
+		function seedSession(stateManager: AgentHostStateManager, session: URI): void {
+			stateManager.createSession({
+				resource: session.toString(),
+				provider: 'copilotcli',
+				title: 'Test',
+				status: SessionStatus.Idle,
+				createdAt: new Date().toISOString(),
+				modifiedAt: new Date().toISOString(),
+				project: { uri: 'file:///project', displayName: 'Project' },
+			});
+			stateManager.setSessionConfig(session.toString(), {
+				schema: platformSessionSchema.toProtocol(),
+				values: { [SessionConfigKey.AutoApprove]: 'assisted' },
+			});
+		}
+
+		test('syncs a session when its approval level changes', async () => {
+			const { agent, configurationService, stateManager } = createTestAgentContext(disposables);
+			try {
+				const session = AgentSession.uri('copilotcli', 'permission-config');
+				seedSession(stateManager, session);
+				const synced = new DeferredPromise<string>();
+				setDefaultSessionStub(agent, AgentSession.id(session), {
+					syncPermissionMode: async (source: string) => synced.complete(source),
+					dispose() { },
+				});
+
+				configurationService.updateSessionConfig(session.toString(), { [SessionConfigKey.AutoApprove]: 'default' });
+
+				assert.strictEqual(await synced.p, 'config-change');
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+
+		test('syncs active sessions when root approval configuration changes', async () => {
+			const { agent, configurationService } = createTestAgentContext(disposables);
+			try {
+				const session = AgentSession.uri('copilotcli', 'root-permission-config');
+				const synced = new DeferredPromise<string>();
+				setDefaultSessionStub(agent, AgentSession.id(session), {
+					syncPermissionMode: async (source: string) => synced.complete(source),
+					dispose() { },
+				});
+
+				configurationService.updateRootConfig({ [AgentHostGlobalAutoApproveEnabledConfigKey]: true });
+
+				assert.strictEqual(await synced.p, 'config-change');
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+
+		test('fails closed when a live permission mode update fails', async () => {
+			const { agent, configurationService, stateManager } = createTestAgentContext(disposables);
+			try {
+				const session = AgentSession.uri('copilotcli', 'permission-config-failure');
+				seedSession(stateManager, session);
+				const released = new DeferredPromise<void>();
+				let aborted = false;
+				setDefaultSessionStub(agent, AgentSession.id(session), {
+					syncPermissionMode: async () => { throw new Error('permission mode update failed'); },
+					abort: async () => { aborted = true; },
+					destroySession: async () => released.complete(),
+					dispose() { },
+				});
+
+				configurationService.updateSessionConfig(session.toString(), { [SessionConfigKey.AutoApprove]: 'default' });
+				await released.p;
+				await timeout(0);
+
+				assert.deepStrictEqual({
+					aborted,
+					inMemory: sessionsMap(agent).has(AgentSession.id(session)),
+				}, {
+					aborted: true,
+					inMemory: false,
+				});
 			} finally {
 				await disposeAgent(agent);
 			}

@@ -434,9 +434,14 @@ export class CopilotAgent extends Disposable implements IAgent {
 		// startup changes, disposing any active sessions. These values are applied in
 		// `_ensureClient`, so they only take effect on the next client start.
 		this._register(this._configurationService.onDidRootConfigChange(() => {
-			this._restartClientIfStartupConfigChanged().catch(err =>
-				this._logService.error('[Copilot] Failed to restart client after config change', err)
+			this._handleRootConfigChange().catch(err =>
+				this._logService.error('[Copilot] Failed to apply root config change', err)
 			);
+		}));
+		this._register(this._configurationService.onDidSessionConfigChange(event => {
+			if (Object.hasOwn(event.config, SessionConfigKey.AutoApprove)) {
+				void this._syncPermissionModesForSession(AgentSession.id(event.session));
+			}
 		}));
 
 		// Surface renderer BYOK models in the picker: republish them whenever the
@@ -537,6 +542,31 @@ export class CopilotAgent extends Disposable implements IAgent {
 			this._githubTokensBySdkSession.clear();
 			await this._stopClient();
 		}
+	}
+
+	private async _handleRootConfigChange(): Promise<void> {
+		await this._restartClientIfStartupConfigChanged();
+		await Promise.all([...this._sessions.keys()].map(sessionId => this._syncPermissionModesForSession(sessionId)));
+	}
+
+	private _syncPermissionModesForSession(sessionId: string): Promise<void> {
+		return this._sessionSequencer.queue(sessionId, async () => {
+			const entry = this._sessions.get(sessionId);
+			if (!entry) {
+				return;
+			}
+			try {
+				await Promise.all(entry.allChatSessions().map(chat => chat.syncPermissionMode('config-change')));
+			} catch (error) {
+				this._logService.error(error, `[Copilot:${sessionId}] Failed to apply permission config change; releasing session`);
+				await Promise.allSettled(entry.allChatSessions().map(chat => chat.abort()));
+				try {
+					await this._releaseSessionResources(sessionId);
+				} catch (releaseError) {
+					this._logService.error(releaseError, `[Copilot:${sessionId}] Failed to release session after permission config sync failure`);
+				}
+			}
+		});
 	}
 
 	protected _createCopilotClient(options: CopilotClientOptions): CopilotClient {
@@ -948,6 +978,8 @@ export class CopilotAgent extends Disposable implements IAgent {
 			env['COPILOT_CLI_RUN_AS_NODE'] = '1';
 			env['USE_BUILTIN_RIPGREP'] = 'false';
 			env['COPILOT_MCP_APPS'] = 'true';
+			// Required by the currently bundled SDK to enable its experimental auto-approval judge.
+			env['AUTO_APPROVAL'] = 'true';
 			await this._configureProxyEnv(env);
 
 			// On Linux the MXC bubblewrap sandbox backend does not forward a PTY into
