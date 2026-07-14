@@ -5,15 +5,18 @@
 
 import assert from 'assert';
 import { DeferredPromise, timeout } from '../../../../../base/common/async.js';
+import { StandardMouseEvent } from '../../../../../base/browser/mouseEvent.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
-import { Action } from '../../../../../base/common/actions.js';
+import { Action, IAction } from '../../../../../base/common/actions.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { observableValue } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { mock, upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
-import { IActionListDelegate, IActionListItem } from '../../../../../platform/actionWidget/browser/actionList.js';
+import { IActionListDelegate, IActionListItem, IActionListOptions } from '../../../../../platform/actionWidget/browser/actionList.js';
+import { IAnchor } from '../../../../../base/browser/ui/contextview/contextview.js';
+import { IListAccessibilityProvider } from '../../../../../base/browser/ui/list/listWidget.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { ILogService, NullLogService } from '../../../../../platform/log/common/log.js';
 import { GitRefType, IGitRepository, IGitService } from '../../../../../workbench/contrib/git/common/gitService.js';
@@ -28,12 +31,29 @@ const FOLDER = URI.file('/workspace');
 class RecordingActionWidgetService extends mock<IActionWidgetService>() {
 	override isVisible = false;
 	labels: readonly string[] = [];
+	details: ReadonlyArray<IActionListItem<unknown>['detail']> = [];
+	ariaLabels: readonly string[] = [];
 	private selectItem: ((label: string) => void) | undefined;
 	private hideWidget: ((didCancel?: boolean) => void) | undefined;
 
-	override show<T>(_user: string, _supportsPreview: boolean, items: readonly IActionListItem<T>[], delegate: IActionListDelegate<T>): void {
+	override show<T>(
+		_user: string,
+		_supportsPreview: boolean,
+		items: readonly IActionListItem<T>[],
+		delegate: IActionListDelegate<T>,
+		_anchor: HTMLElement | StandardMouseEvent | IAnchor,
+		_container: HTMLElement | undefined,
+		_actionBarActions: readonly IAction[],
+		accessibilityProvider?: Partial<IListAccessibilityProvider<IActionListItem<T>>>,
+		_listOptions?: IActionListOptions,
+	): void {
 		this.isVisible = true;
 		this.labels = items.map(item => item.label ?? '');
+		this.details = items.map(item => item.detail);
+		this.ariaLabels = items.map(item => {
+			const label = accessibilityProvider?.getAriaLabel?.(item);
+			return typeof label === 'string' ? label : label?.get() ?? '';
+		});
 		this.selectItem = label => {
 			const item = items.find(candidate => candidate.label === label)?.item;
 			if (item) {
@@ -212,10 +232,12 @@ suite('Automation branch picker', () => {
 			label: trigger.querySelector('.automation-form-branch-name')?.textContent,
 			persistedBranch: model.persistedBranch,
 			pickerItems: actionWidgetService.labels,
+			ariaLabels: actionWidgetService.ariaLabels,
 		}, {
 			label: 'feature/deleted',
 			persistedBranch: 'feature/deleted',
 			pickerItems: ['feature/deleted', 'feature/a', 'feature/z', 'main'],
+			ariaLabels: ['feature/deleted, unavailable locally', 'feature/a', 'feature/z', 'main'],
 		});
 	});
 
@@ -300,6 +322,29 @@ suite('Automation branch picker', () => {
 			disabled: 'false',
 			labels: ['main'],
 		});
+	});
+
+	test('explains that Worktree is unavailable while branches load', async () => {
+		const refs = new DeferredPromise<Awaited<ReturnType<IGitRepository['getRefs']>>>();
+		const { container, actionWidgetService } = createItem({
+			state: createFormState({ isolationMode: 'workspace' }),
+			getRefs: async () => refs.p,
+		});
+		await timeout(0);
+		const isolationTrigger = container.querySelector<HTMLElement>('.automation-form-isolation-chip');
+		assert.ok(isolationTrigger);
+
+		isolationTrigger.click();
+		assert.deepStrictEqual({
+			labels: actionWidgetService.labels,
+			details: actionWidgetService.details,
+		}, {
+			labels: ['Worktree', 'Folder'],
+			details: ['Local branches are loading.', undefined],
+		});
+
+		actionWidgetService.hide(true);
+		await refs.complete([{ type: GitRefType.Head, name: 'main' }]);
 	});
 
 	test('offers retry when opening the repository fails in Folder mode', async () => {

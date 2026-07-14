@@ -181,7 +181,7 @@ export class BranchPicker extends Disposable {
 				getAriaLabel: item => {
 					const label = item.label ?? '';
 					return item.item?.unavailable
-						? localize('branchPicker.unavailableAriaLabel', "{0}, unavailable locally, current branch", label)
+						? localize('branchPicker.unavailableAriaLabel', "{0}, unavailable locally", label)
 						: label;
 				},
 				getWidgetAriaLabel: () => localize('branchPicker.ariaLabel', "Branch Picker"),

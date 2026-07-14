@@ -8,8 +8,12 @@ import { URI } from '../../../../base/common/uri.js';
 
 const GENERATED_WORKTREE_BRANCH_MARKER = 'copilot-worktree-';
 
+function isSelectableAutomationBranch(name: string | undefined): name is string {
+	return !!name && !name.includes(GENERATED_WORKTREE_BRANCH_MARKER);
+}
+
 export function normalizeAutomationBranchNames(names: Iterable<string | undefined>): readonly string[] {
-	return [...new Set([...names].filter((name): name is string => !!name && !name.includes(GENERATED_WORKTREE_BRANCH_MARKER)))].sort((a, b) => a.localeCompare(b));
+	return [...new Set([...names].filter(isSelectableAutomationBranch))].sort((a, b) => a.localeCompare(b));
 }
 
 export interface IAutomationIsolationFormState {
@@ -94,7 +98,7 @@ export class AutomationIsolationModel {
 	}
 
 	setHeadBranch(branch: string | undefined): void {
-		this._headBranch = branch;
+		this._headBranch = isSelectableAutomationBranch(branch) ? branch : undefined;
 	}
 
 	selectBranch(branch: string): void {

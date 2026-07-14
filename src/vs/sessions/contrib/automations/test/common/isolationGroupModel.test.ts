@@ -57,6 +57,23 @@ suite('AutomationIsolationModel', () => {
 		});
 	});
 
+	test('does not use generated worktree HEAD as an implicit branch', () => {
+		const state = createState({ isolationMode: 'worktree' });
+		const model = new AutomationIsolationModel(state);
+		model.setSupportsWorktreeConfiguration(true);
+		model.setHeadBranch('copilot-worktree-2026-07-14');
+
+		assert.deepStrictEqual({
+			headBranch: model.headBranch,
+			displayBranch: model.displayBranch,
+			persistedBranch: model.persistedBranch,
+		}, {
+			headBranch: undefined,
+			displayBranch: undefined,
+			persistedBranch: undefined,
+		});
+	});
+
 	test('keeps explicit branch intent across temporary isolation-mode toggles', () => {
 		const state = createState({ isolationMode: 'worktree', branch: 'feature/saved' });
 		const model = new AutomationIsolationModel(state);

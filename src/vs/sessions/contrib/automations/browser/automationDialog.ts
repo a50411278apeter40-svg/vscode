@@ -39,6 +39,7 @@ import { hasNativeContextMenu } from '../../../../platform/window/common/window.
 import { WorkspacePicker } from '../../chat/browser/sessionWorkspacePicker.js';
 import { BranchPicker, IBranchPickerBranch } from '../../chat/browser/branchPicker.js';
 import { MobileSessionTypePicker } from '../../chat/browser/mobile/mobileSessionTypePicker.js';
+import { isMobilePickerSheetTarget } from '../../../browser/parts/mobile/mobilePickerSheet.js';
 import { ISession, ISessionWorkspaceBrowseAction, SESSION_WORKSPACE_GROUP_LOCAL } from '../../../services/sessions/common/session.js';
 import { IGitRepository, IGitService } from '../../../../workbench/contrib/git/common/gitService.js';
 import { AutomationInterval } from '../../../../workbench/contrib/chat/common/automations/automation.js';
@@ -66,8 +67,8 @@ const INTERVALS: { readonly value: AutomationInterval; readonly label: string }[
 
 // Popup containers (context views, quick picks, menus, hovers) must not trip the dialog's focus-trap.
 export function isAutomationDialogPopupTarget(relatedTarget: HTMLElement): boolean {
-	return !!relatedTarget.closest(
-		'.context-view, .quick-input-widget, .monaco-menu-container, .monaco-hover, .monaco-hover-content, .mobile-picker-sheet'
+	return isMobilePickerSheetTarget(relatedTarget) || !!relatedTarget.closest(
+		'.context-view, .quick-input-widget, .monaco-menu-container, .monaco-hover, .monaco-hover-content'
 	);
 }
 
@@ -378,11 +379,36 @@ export class AutomationIsolationGroupActionViewItem extends BaseActionViewItem {
 			&& this.branchLoadState !== 'loadingBranches';
 	}
 
-	private canSelectWorktree(): boolean {
-		return !!this.isolationModel.folderUri
-			&& this.worktreeCapabilityResolved
-			&& this.isolationModel.supportsWorktreeConfiguration
-			&& (!!this.isolationModel.selectedBranch || this.branchLoadState === 'ready' && this.branches.length > 0);
+	private getWorktreeUnavailableReason(): string | undefined {
+		if (!this.isolationModel.folderUri) {
+			return localize('automation.form.isolation.worktreeNoFolder', "Select a folder to use Worktree isolation.");
+		}
+		if (!this.worktreeCapabilityResolved) {
+			return localize('automation.form.branch.capabilityLoadingReason', "Session capabilities are loading.");
+		}
+		if (!this.isolationModel.supportsWorktreeConfiguration) {
+			return localize('automation.form.isolation.worktreeUnavailable', "Not supported by the selected session type");
+		}
+		if (this.isolationModel.selectedBranch) {
+			return undefined;
+		}
+		switch (this.branchLoadState) {
+			case 'loadingRepository':
+			case 'loadingBranches':
+				return localize('automation.form.branch.loadingReason', "Local branches are loading.");
+			case 'noRepository':
+				return localize('automation.form.branch.noRepoReason', "No Git repository was found for the selected folder.");
+			case 'error':
+				return localize('automation.form.branch.loadErrorReason', "Open the branch picker to retry loading local branches.");
+			case 'empty':
+				return localize('automation.form.branch.noBranchesReason', "No local branches were found in this repository.");
+			case 'ready':
+				return this.branches.length > 0
+					? undefined
+					: localize('automation.form.branch.noBranchesReason', "No local branches were found in this repository.");
+			case 'noFolder':
+				return localize('automation.form.isolation.worktreeNoFolder', "Select a folder to use Worktree isolation.");
+		}
 	}
 
 	private showIsolationPicker(): void {
@@ -390,16 +416,15 @@ export class AutomationIsolationGroupActionViewItem extends BaseActionViewItem {
 			return;
 		}
 		const currentMode = this.state.isolationMode ?? 'workspace';
-		const worktreeDisabled = !this.canSelectWorktree();
+		const worktreeUnavailableReason = this.getWorktreeUnavailableReason();
+		const worktreeDisabled = worktreeUnavailableReason !== undefined;
 		const items: IActionListItem<IIsolationPickerItem>[] = [
 			{
 				kind: ActionListItemKind.Action,
 				label: localize('automation.form.isolation.worktree', "Worktree"),
 				group: { title: '', icon: Codicon.worktree },
 				disabled: worktreeDisabled,
-				detail: worktreeDisabled
-					? localize('automation.form.isolation.worktreeUnavailable', "Not supported by the selected session type")
-					: undefined,
+				detail: worktreeUnavailableReason,
 				item: { mode: 'worktree', checked: currentMode === 'worktree' || undefined },
 			},
 			{
