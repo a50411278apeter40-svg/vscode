@@ -16,7 +16,7 @@ import { ILogService } from '../../log/common/log.js';
 import { IAgentHostChangesetService } from '../common/agentHostChangesetService.js';
 import { IAgentHostCheckpointService } from '../common/agentHostCheckpointService.js';
 import { AgentSession, AgentSignal, IAgent, IAgentToolPendingConfirmationSignal } from '../common/agentService.js';
-import { toToolCallMeta } from '../common/meta/agentToolCallMeta.js';
+import { readToolCallMeta, toToolCallMeta } from '../common/meta/agentToolCallMeta.js';
 
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { ISessionDataService } from '../common/sessionDataService.js';
@@ -345,7 +345,16 @@ export class AgentSideEffects extends Disposable {
 		const clientExecutionId = this._toolClientExecutionNeededId(chatUri, turnId, toolCallId);
 		const toolCall = this._findToolCall(chatUri, turnId, toolCallId);
 
-		const needsConfirmation = toolCall?.status === ToolCallStatus.PendingConfirmation || toolCall?.status === ToolCallStatus.PendingResultConfirmation;
+		// A call auto-approved by the session's bypass setting is run
+		// automatically by the owning client and never blocks on the user, so
+		// keep it out of the session `inputNeeded` queue (which would flash
+		// "input needed" in the sessions list). `autoApproveBySetting` covers
+		// only the parameter gate; a `PendingResultConfirmation` is a genuine
+		// prompt and is still surfaced.
+		const autoApproved = !!toolCall && readToolCallMeta(toolCall).autoApproveBySetting === true;
+
+		const suppressAutoApprovedConfirmation = autoApproved && toolCall?.status === ToolCallStatus.PendingConfirmation;
+		const needsConfirmation = !suppressAutoApprovedConfirmation && (toolCall?.status === ToolCallStatus.PendingConfirmation || toolCall?.status === ToolCallStatus.PendingResultConfirmation);
 		if (needsConfirmation && toolCall) {
 			this._setSessionInputNeeded(chatUri, {
 				id: confirmationId,
@@ -359,7 +368,7 @@ export class AgentSideEffects extends Disposable {
 		}
 
 		const contributor = toolCall?.contributor;
-		if (toolCall?.status === ToolCallStatus.Running && contributor?.kind === ToolCallContributorKind.Client) {
+		if (!autoApproved && toolCall?.status === ToolCallStatus.Running && contributor?.kind === ToolCallContributorKind.Client) {
 			this._setSessionInputNeeded(chatUri, {
 				id: clientExecutionId,
 				kind: SessionInputRequestKind.ToolClientExecution,
