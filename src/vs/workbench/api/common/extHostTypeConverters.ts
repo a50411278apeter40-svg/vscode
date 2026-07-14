@@ -3501,6 +3501,7 @@ export namespace ChatAgentRequest {
 			hasHooksEnabled: request.hasHooksEnabled ?? false,
 			hooks: request.hooks ? ChatRequestHooksConverter.to(request.hooks) : undefined,
 			isSystemInitiated: request.isSystemInitiated,
+			notification: request.notification,
 		};
 
 		if (!isProposedApiEnabled(extension, 'chatParticipantPrivate')) {
