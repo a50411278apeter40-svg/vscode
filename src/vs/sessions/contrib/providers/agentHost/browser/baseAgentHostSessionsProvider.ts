@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { disposableTimeout, raceTimeout } from '../../../../../base/common/async.js';
-import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { disposableTimeout, raceCancellationError } from '../../../../../base/common/async.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { arrayEquals, structuralEquals } from '../../../../../base/common/equals.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
@@ -47,7 +47,7 @@ import { agentHostSessionWorkspaceKey } from '../../../../common/agentHostSessio
 import { isSessionConfigComplete } from '../../../../common/sessionConfig.js';
 import { ChatInteractivity, ChatOriginKind, DEFAULT_CHAT_CAPABILITIES, effectiveChatInteractivity, IChat, IChatCapabilities, IGitHubInfo, ISession, ISessionAgentRef, ISessionCapabilities, ISessionChangeset, ISessionChangesSummary, ISessionFile, ISessionFileChange, ISessionType, ISessionWorkspace, ISessionWorkspaceBrowseAction, sessionFileChangesEqual, SessionStatus, toSessionId } from '../../../../services/sessions/common/session.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
-import { IDeleteChatOptions, ISendRequestOptions, ISessionChangeEvent, ISessionModelPickerOptions } from '../../../../services/sessions/common/sessionsProvider.js';
+import { IDeleteChatOptions, ISendRequestOptions, ISessionChangeEvent, ISessionModelPickerOptions, ISessionRepositoryConfiguration, ISessionTypeCapabilities } from '../../../../services/sessions/common/sessionsProvider.js';
 import { IGitHubService } from '../../../github/browser/githubService.js';
 import { computeLivePullRequestIcon } from '../../../github/browser/pullRequestIconStatus.js';
 import { computePullRequestIcon, GitHubPullRequestState } from '../../../github/common/types.js';
@@ -1339,6 +1339,7 @@ class NewSession extends Disposable {
 	 * optimistic `onDidChangeSessionConfig` pulse already exposes it.
 	 */
 	private readonly _isResolvingConfig: ISettableObservable<boolean>;
+	private readonly _lifetimeCts = this._register(new CancellationTokenSource());
 
 	/** Backend session URI, set the moment {@link eagerCreate} starts. */
 	private _backendUri: URI | undefined;
@@ -1495,6 +1496,7 @@ class NewSession extends Disposable {
 	 * {@link _isResolvingConfig} for why this is distinct from {@link ISession.loading}.
 	 */
 	get isResolvingConfig(): IObservable<boolean> { return this._isResolvingConfig; }
+	get cancellationToken(): CancellationToken { return this._lifetimeCts.token; }
 
 	/** Mark a resolve as starting before the optimistic event fires. */
 	beginResolveConfigSync(): void {
@@ -1517,7 +1519,7 @@ class NewSession extends Disposable {
 	 * call was not stale by the time the response arrived). On failure, the
 	 * cached config is cleared so {@link getConfig} returns `undefined`.
 	 */
-	async resolveConfig(connection: IAgentConnection): Promise<boolean> {
+	async resolveConfig(connection: IAgentConnection, strict = false): Promise<boolean> {
 		const seq = ++this._configRequestSeq;
 		this._isResolvingConfig.set(true, undefined);
 		try {
@@ -1531,11 +1533,14 @@ class NewSession extends Disposable {
 			}
 			this._config = result;
 			return true;
-		} catch {
+		} catch (error) {
 			if (seq !== this._configRequestSeq) {
 				return false;
 			}
 			this._config = undefined;
+			if (strict) {
+				throw error;
+			}
 			return true;
 		} finally {
 			// Only the latest request owns the flag.
@@ -1653,6 +1658,7 @@ class NewSession extends Disposable {
 	 * graduated into a real running session.
 	 */
 	graduate(): void {
+		this._lifetimeCts.cancel();
 		// Detach the new-session listener BEFORE releasing the subscription.
 		// Both code paths (this one and the running-session pipeline) write
 		// `_lastSessionStates` under the same `sessionId` key, so detaching
@@ -1667,6 +1673,7 @@ class NewSession extends Disposable {
 	}
 
 	override dispose(): void {
+		this._lifetimeCts.cancel();
 		// Bump the seq so any in-flight resolveConfig discards itself.
 		this._configRequestSeq++;
 
@@ -2138,6 +2145,12 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		return [...this.sessionTypes];
 	}
 
+	getSessionTypeCapabilities(sessionTypeId: string): ISessionTypeCapabilities {
+		return {
+			supportsWorktreeConfiguration: sessionTypeId === CopilotCLISessionType.id,
+		};
+	}
+
 	getSessions(): ISession[] {
 		this._ensureSessionCache();
 		// Filter at read time (rather than evicting from the cache) so a gate
@@ -2328,7 +2341,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * {@link _onDidChangeSessionConfig}. The {@link NewSession} owns its own
 	 * stale-request guard so back-to-back calls are safe.
 	 */
-	private async _refreshNewSessionConfig(session: NewSession): Promise<void> {
+	private async _refreshNewSessionConfig(session: NewSession, expected?: Readonly<Record<string, unknown>>): Promise<void> {
 		const connection = this.connection;
 		if (!connection) {
 			// {@link resolveConfig} (the only other clear path) is skipped
@@ -2337,17 +2350,35 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 			session.endResolveConfigSync();
 			session.setLoading(false);
 			this._onDidChangeSessionConfig.fire(session.sessionId);
+			if (expected) {
+				throw new Error('Cannot set session repository config without an agent host connection.');
+			}
 			return;
 		}
 		session.setLoading(true);
-		const applied = await session.resolveConfig(connection);
+		let applied: boolean;
+		try {
+			applied = await session.resolveConfig(connection, !!expected);
+		} catch (error) {
+			session.setLoading(false);
+			this._onDidChangeSessionConfig.fire(session.sessionId);
+			throw error;
+		}
 		// Bail if a newer call superseded us — its own pulse will take over.
 		if (!applied || this._newSessions.get(session.sessionId) !== session) {
+			if (expected) {
+				throw new Error('Session repository config was superseded before it could be applied.');
+			}
 			return;
 		}
 		const config = session.getConfig();
 		session.setLoading(config !== undefined && !isSessionConfigComplete(config));
 		this._onDidChangeSessionConfig.fire(session.sessionId);
+		for (const [property, value] of Object.entries(expected ?? {})) {
+			if (!equals(config?.values[property], value)) {
+				throw new Error(`Agent host did not apply session config '${property}'.`);
+			}
+		}
 	}
 
 	/** Subclass hook for additional pre-create checks (e.g. remote requires connection). */
@@ -2476,12 +2507,16 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 			: constObservable(false);
 	}
 
-	async setSessionConfigValue(sessionId: string, property: string, value: unknown): Promise<void> {
+	setSessionConfigValue(sessionId: string, property: string, value: unknown): Promise<void> {
+		return this._setSessionConfigValue(sessionId, property, value, true);
+	}
+
+	private async _setSessionConfigValue(sessionId: string, property: string, value: unknown, remember: boolean): Promise<void> {
 		const policyRestricted = isAutoApprovePolicyRestricted(this._baseConfigurationService);
 		const normalizedValue = normalizeSessionConfigValue(property, value, policyRestricted);
 
 		// Remember config picks across sessions
-		if (typeof normalizedValue === 'string' && isSafeSessionConfigKey(property)) {
+		if (remember && typeof normalizedValue === 'string' && isSafeSessionConfigKey(property)) {
 			const rememberedValues = this._storageService.getObject<Record<string, unknown>>(STORAGE_KEY_REMEMBERED_SESSION_CONFIG_VALUES, StorageScope.PROFILE, {});
 			const nextRememberedValues = Object.create(null) as Record<string, string>;
 			for (const [key, rememberedValue] of Object.entries(rememberedValues)) {
@@ -2629,6 +2664,50 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 
 	getCreateSessionConfig(sessionId: string): Record<string, unknown> | undefined {
 		return this._getNewSession(sessionId)?.getConfigValues();
+	}
+
+	async setIsolationMode(sessionId: string, mode: string): Promise<void> {
+		await this.setRepositoryConfiguration(sessionId, { isolationMode: mode });
+	}
+
+	async setBranch(sessionId: string, branch: string): Promise<void> {
+		await this.setRepositoryConfiguration(sessionId, { branch });
+	}
+
+	async setRepositoryConfiguration(sessionId: string, configuration: ISessionRepositoryConfiguration): Promise<void> {
+		const newSession = this._getNewSession(sessionId);
+		if (!newSession) {
+			throw new Error('Cannot configure repository settings after session creation.');
+		}
+		await waitForState(this.authenticationPending, pending => !pending, undefined, newSession.cancellationToken);
+		await waitForState(newSession.isResolvingConfig, resolving => !resolving, undefined, newSession.cancellationToken);
+		if (this._getNewSession(sessionId) !== newSession) {
+			throw new Error('Session was disposed before repository configuration could be applied.');
+		}
+
+		const policyRestricted = isAutoApprovePolicyRestricted(this._baseConfigurationService);
+		const values: Record<string, unknown> = {};
+		if (configuration.isolationMode) {
+			values[SessionConfigKey.Isolation] = normalizeSessionConfigValue(
+				SessionConfigKey.Isolation,
+				configuration.isolationMode === 'workspace' ? 'folder' : configuration.isolationMode,
+				policyRestricted,
+			);
+		}
+		if (configuration.branch) {
+			values[SessionConfigKey.Branch] = normalizeSessionConfigValue(SessionConfigKey.Branch, configuration.branch, policyRestricted);
+		}
+		if (Object.keys(values).length === 0) {
+			return;
+		}
+
+		newSession.beginResolveConfigSync();
+		newSession.setLoading(true);
+		for (const [property, value] of Object.entries(values)) {
+			newSession.setConfigValue(property, value);
+		}
+		this._onDidChangeSessionConfig.fire(sessionId);
+		await this._refreshNewSessionConfig(newSession, values);
 	}
 
 	clearSessionConfig(sessionId: string): void {
@@ -3321,7 +3400,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		// Raw id claimed by _waitForNewSession for this send (released in finally).
 		let committedRawId: string | undefined;
 		try {
-			const committedSession = await this._waitForNewSession(existingKeys, chatResource.scheme, newSessionRawId);
+			const committedSession = await this._waitForNewSession(existingKeys, chatResource.scheme, newSessionRawId, newSession.cancellationToken);
 			if (committedSession) {
 				committedRawId = committedSession.resource.path.substring(1);
 				this._preserveNewSessionConfig(newSession, committedSession.sessionId);
@@ -3979,7 +4058,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * type that happens to appear mid-send — a slow codex send racing against a
 	 * restored claude session, say — is never mistaken for this send's commit.
 	 */
-	private async _waitForNewSession(existingKeys: Set<string>, expectedScheme: string, ownRawId: string): Promise<ISession | undefined> {
+	private async _waitForNewSession(existingKeys: Set<string>, expectedScheme: string, ownRawId: string, token: CancellationToken): Promise<ISession | undefined> {
 		// A candidate backend session commits THIS send when it is unclaimed,
 		// of the expected type, and either (a) carries this send's own id — the
 		// eager/committed id is preserved, so this is the exact match — or
@@ -4033,7 +4112,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 				}));
 				waitDisposables.add(this.onConnectionLost(() => resolve(undefined)));
 			});
-			return await raceTimeout(sessionPromise, 30_000);
+			return await raceCancellationError(sessionPromise, token);
 		} finally {
 			waitDisposables.dispose();
 		}

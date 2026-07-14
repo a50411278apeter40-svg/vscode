@@ -57,6 +57,16 @@ export interface ISessionModelPickerOptions {
 	readonly showAutoModel?: boolean;
 }
 
+export interface ISessionTypeCapabilities {
+	/** Whether this provider can configure Worktree isolation and its base branch for the session type. */
+	readonly supportsWorktreeConfiguration?: boolean;
+}
+
+export interface ISessionRepositoryConfiguration {
+	readonly isolationMode?: string;
+	readonly branch?: string;
+}
+
 /**
  * Options controlling how a chat is deleted via {@link ISessionsProvider.deleteChat}.
  */
@@ -202,6 +212,11 @@ export interface ISessionsProvider {
 	getSessionTypes(workspaceUri: URI): ISessionType[];
 
 	/**
+	 * Returns provider-specific capabilities for a session type.
+	 */
+	getSessionTypeCapabilities?(sessionTypeId: string): ISessionTypeCapabilities;
+
+	/**
 	 * Rename a chat within a session.
 	 * @param sessionId The ID of the session containing the chat to rename.
 	 * @param chatUri The URI of the chat to rename.
@@ -274,14 +289,19 @@ export interface ISessionsProvider {
 	 * @param sessionId The ID of the session.
 	 * @param mode The isolation mode to set.
 	 */
-	setIsolationMode?(sessionId: string, mode: string): void;
+	setIsolationMode?(sessionId: string, mode: string): void | Promise<void>;
 
 	/**
 	 * Set the git branch for a session.
 	 * @param sessionId The ID of the session.
 	 * @param branch The branch name to set.
 	 */
-	setBranch?(sessionId: string, branch: string): void;
+	setBranch?(sessionId: string, branch: string): void | Promise<void>;
+
+	/**
+	 * Applies repository configuration atomically when the provider requires a single validation round-trip.
+	 */
+	setRepositoryConfiguration?(sessionId: string, configuration: ISessionRepositoryConfiguration): void | Promise<void>;
 
 	/**
 	 * Archive a session.

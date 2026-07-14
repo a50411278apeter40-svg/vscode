@@ -14,6 +14,10 @@ import { localize } from '../../../../nls.js';
 
 const $ = DOM.$;
 
+export function isMobilePickerSheetTarget(target: HTMLElement): boolean {
+	return !!target.closest('.mobile-picker-sheet');
+}
+
 /**
  * One row in the {@link showMobilePickerSheet} bottom sheet.
  *
