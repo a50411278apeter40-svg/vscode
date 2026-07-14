@@ -2890,7 +2890,41 @@ pane is first mounted. View switches inside the modal are not animated. */
 	gap: 5px;
 }
 
-.automation-form-prompt-host .automation-form-isolation-chip,
+.automation-form-prompt-host .automation-form-isolation-group.sessions-chat-isolation-checkbox .action-label {
+	display: inline-flex;
+	align-items: center;
+	cursor: pointer;
+	touch-action: manipulation;
+	gap: 4px;
+	height: 16px;
+	padding: 3px 6px;
+	font-size: 11px;
+	color: var(--vscode-icon-foreground);
+	background: transparent;
+	border: none;
+	min-width: 0;
+	border-radius: var(--vscode-cornerRadius-small);
+}
+
+.automation-form-prompt-host .automation-form-isolation-group.sessions-chat-isolation-checkbox .action-label:not(.disabled):hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.automation-form-prompt-host .automation-form-isolation-group.sessions-chat-isolation-checkbox .action-label.disabled {
+	cursor: default;
+}
+
+.automation-form-prompt-host .automation-form-isolation-group.sessions-chat-isolation-checkbox .monaco-checkbox {
+	margin-right: 6px;
+}
+
+.automation-form-prompt-host .automation-form-isolation-group.sessions-chat-isolation-checkbox .sessions-chat-dropdown-label {
+	font-size: 11px;
+	margin-left: 0;
+	cursor: pointer;
+}
+
 .automation-form-prompt-host .automation-form-branch-slot {
 	display: inline-flex;
 	align-items: center;
@@ -2904,33 +2938,14 @@ pane is first mounted. View switches inside the modal are not animated. */
 	min-width: 0;
 }
 
-.automation-form-prompt-host .automation-form-isolation-chip > .codicon,
 .automation-form-prompt-host .automation-form-branch-slot > .codicon {
 	font-size: 12px;
 	color: var(--vscode-icon-foreground);
 	flex-shrink: 0;
 }
 
-.automation-form-prompt-host .automation-form-isolation-chip {
-	cursor: pointer;
-	border-radius: var(--vscode-cornerRadius-small);
-}
-
-.automation-form-prompt-host .automation-form-isolation-chip:not(.automation-form-isolation-chip-disabled):hover {
-	background-color: var(--vscode-toolbar-hoverBackground);
-	color: var(--vscode-foreground);
-}
-
-.automation-form-prompt-host .automation-form-isolation-chip-disabled {
-	cursor: default;
-}
-
-.automation-form-prompt-host .automation-form-isolation-label,
 .automation-form-prompt-host .automation-form-branch-name {
 	font-size: 11px;
-}
-
-.automation-form-prompt-host .automation-form-branch-name {
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -2942,6 +2957,36 @@ pane is first mounted. View switches inside the modal are not animated. */
  * a 1px-wide bar in the gap to the chip's left. */
 .automation-form-prompt-host .automation-form-isolation-group > .automation-form-branch-slot {
 	box-shadow: -5px 0 0 -4px var(--vscode-editorWidget-border);
+}
+
+.automation-form-prompt-host .automation-form-branch-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+	touch-action: manipulation;
+	border-radius: var(--vscode-cornerRadius-small);
+	padding: 1px 4px;
+}
+
+.automation-form-prompt-host .automation-form-branch-chip:not(.disabled):hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.automation-form-prompt-host .automation-form-branch-chip:not(.disabled):focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.automation-form-prompt-host .automation-form-branch-chip.disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.automation-form-prompt-host .automation-form-branch-chip > .codicon.codicon-chevron-down-compact {
+	font-size: 12px;
+	margin-left: 2px;
 }
 
 .automation-form-prompt-host .chat-secondary-toolbar .automation-form-harness-chip {
