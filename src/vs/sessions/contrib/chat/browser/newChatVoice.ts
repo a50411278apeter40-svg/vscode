@@ -42,6 +42,8 @@ export interface INewChatVoiceComposer {
 	sendQuery(text: string): void;
 	/** Set `text` without submitting. */
 	prefillInput(text: string): void;
+	/** The composer's current draft text (empty when unmounted). */
+	getInput(): string;
 	/** Focus the composer input. */
 	focus(): void;
 }
@@ -97,6 +99,7 @@ registerSingleton(INewChatVoiceTargetService, NewChatVoiceTargetService, Instant
 export const SessionsNewChatVoiceMenu = new MenuId('SessionsNewChatVoiceMenu');
 
 const WHEN_VOICE_ENABLED = ContextKeyExpr.equals('config.agents.voice.enabled', true);
+const WHEN_STT_ONLY = ContextKeyExpr.equals('config.agents.voice.chatInputSpeechToText.enabled', true);
 const WHEN_CONNECTING = ContextKeyExpr.equals('agentsVoiceConnecting', true);
 const WHEN_LISTENING = ContextKeyExpr.equals('agentsVoiceListening', true);
 const WHEN_CONNECTED = ContextKeyExpr.equals('agentsVoiceConnected', true);
@@ -112,30 +115,44 @@ MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
 
 MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
 	command: { id: 'agentsVoice.startVoiceInChat', title: localize('agentsVoice.startVoiceInChat', "Voice Mode"), icon: Codicon.voiceMode },
-	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_VOICE_SURFACE, WHEN_LISTENING.negate(), WHEN_CONNECTING.negate()),
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY.negate(), WHEN_VOICE_SURFACE, WHEN_LISTENING.negate(), WHEN_CONNECTING.negate()),
 	group: 'navigation',
 	order: -10,
 });
 
 MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
 	command: { id: 'agentsVoice.pttStopInChat', title: localize('agentsVoice.pttStopInChat', "Voice Mode: Stop Recording"), icon: Codicon.voiceMode },
-	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_LISTENING, WHEN_INITIATED_HERE),
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY.negate(), WHEN_LISTENING, WHEN_INITIATED_HERE),
 	group: 'navigation',
 	order: -10,
 });
 
 MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
 	command: { id: 'agentsVoice.openSettings', title: localize('agentsVoice.openSettings', "Voice Mode Settings"), icon: Codicon.settingsGear },
-	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_CONNECTED, WHEN_INITIATED_HERE),
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY.negate(), WHEN_CONNECTED, WHEN_INITIATED_HERE),
 	group: 'navigation',
 	order: -9.5,
 });
 
 MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
 	command: { id: 'agentsVoice.disconnect', title: localize('agentsVoice.disconnect', "Disconnect Voice Mode"), icon: Codicon.debugDisconnect },
-	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_CONNECTED, WHEN_INITIATED_HERE),
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY.negate(), WHEN_CONNECTED, WHEN_INITIATED_HERE),
 	group: 'navigation',
 	order: -9,
+});
+
+MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
+	command: { id: 'agentsVoice.speechToTextInChatInput', title: localize('agentsVoice.speechToTextInChatInput', "Speech to Text"), icon: Codicon.mic },
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY, WHEN_VOICE_SURFACE, WHEN_CONNECTING.negate(), WHEN_LISTENING.negate()),
+	group: 'navigation',
+	order: -10,
+});
+
+MenuRegistry.appendMenuItem(SessionsNewChatVoiceMenu, {
+	command: { id: 'agentsVoice.speechToTextStopInChatInput', title: localize('agentsVoice.speechToTextStopInChatInput', "Stop Dictation"), icon: Codicon.stopCircle },
+	when: ContextKeyExpr.and(WHEN_VOICE_ENABLED, WHEN_STT_ONLY, WHEN_VOICE_SURFACE, WHEN_LISTENING),
+	group: 'navigation',
+	order: -10,
 });
 
 export interface INewChatVoiceControllerOptions {
