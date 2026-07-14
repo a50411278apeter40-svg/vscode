@@ -127,6 +127,11 @@ export class AgentsWindow {
 
 		const itemSel = `.action-widget .monaco-list-row`;
 		const needle = label.toLowerCase();
+		const isEnabledAction = (el: { className: string }) => el.className.includes('action') && !el.className.includes('option-disabled');
+		const actionLabelMatches = (el: { textContent: string; attributes: Record<string, string> }) => {
+			const ariaLabel = (el.attributes['aria-label'] ?? '').trim().toLowerCase();
+			return ariaLabel === needle || ariaLabel.startsWith(`${needle}, `) || (!ariaLabel && (el.textContent ?? '').trim().toLowerCase() === needle);
+		};
 		const deadline = Date.now() + timeoutMs;
 
 		while (Date.now() < deadline) {
@@ -137,8 +142,7 @@ export class AgentsWindow {
 			const openDeadline = Math.min(deadline, Date.now() + 2_000);
 			while (Date.now() < openDeadline) {
 				const items = await this.code.getElements(itemSel, /* recursive */ true);
-				const labels = (items ?? []).map(i => (i.textContent ?? '').trim());
-				if (labels.some(t => t.toLowerCase().includes(needle))) {
+				if ((items ?? []).some(item => isEnabledAction(item) && actionLabelMatches(item))) {
 					found = true;
 					break;
 				}
@@ -175,6 +179,13 @@ export class AgentsWindow {
 		const itemSel = `.action-widget .monaco-list-row`;
 		const maxAttempts = 3;
 		const needle = label.toLowerCase();
+		const isActionRow = (el: { className: string }) => el.className.includes('action');
+		const isEnabledActionRow = (el: { className: string }) => isActionRow(el) && !el.className.includes('option-disabled');
+		const rowText = (el: { textContent: string }) => (el.textContent ?? '').trim().toLowerCase();
+		const actionLabelMatches = (el: { textContent: string; attributes: Record<string, string> }) => {
+			const ariaLabel = (el.attributes['aria-label'] ?? '').trim().toLowerCase();
+			return ariaLabel === needle || ariaLabel.startsWith(`${needle}, `) || (!ariaLabel && rowText(el) === needle);
+		};
 
 		// The picker click can silently do nothing if the active session
 		// isn't fully initialized yet, and the dropdown is async-populated:
@@ -189,7 +200,10 @@ export class AgentsWindow {
 			while (Date.now() < deadline) {
 				const items = await this.code.getElements(itemSel, /* recursive */ true);
 				lastSeen = (items ?? []).map(i => (i.textContent ?? '').trim());
-				if (lastSeen.some(t => t.toLowerCase().includes(needle))) {
+				if ((items ?? []).some(item =>
+					(isEnabledActionRow(item) && actionLabelMatches(item)) ||
+					(!isActionRow(item) && rowText(item) === needle)
+				)) {
 					break outer;
 				}
 				await new Promise(r => setTimeout(r, 250));
@@ -201,19 +215,17 @@ export class AgentsWindow {
 		}
 
 		const items = await this.code.waitForElements(itemSel, /* recursive */ true);
-		const isActionRow = (el: { className: string }) => el.className.includes('action');
-		const rowText = (el: { textContent: string }) => (el.textContent ?? '').trim().toLowerCase();
 
-		// Prefer an actionable row whose label matches directly (e.g. a
+		// Prefer an enabled actionable row whose label matches exactly (e.g. a
 		// session type label like "Claude" or "Copilot CLI").
-		let matchIndex = items.findIndex(el => isActionRow(el) && rowText(el).includes(needle));
+		let matchIndex = items.findIndex(el => isEnabledActionRow(el) && actionLabelMatches(el));
 		// Otherwise treat the label as a provider section header (e.g. "Local
 		// Agent Host"): headers are non-clickable rows rendered above their
 		// session types, so select the first actionable row beneath the header.
 		if (matchIndex < 0) {
-			const headerIndex = items.findIndex(el => !isActionRow(el) && rowText(el).includes(needle));
+			const headerIndex = items.findIndex(el => !isActionRow(el) && rowText(el) === needle);
 			if (headerIndex >= 0) {
-				matchIndex = items.findIndex((el, index) => index > headerIndex && isActionRow(el));
+				matchIndex = items.findIndex((el, index) => index > headerIndex && isEnabledActionRow(el));
 			}
 		}
 		if (matchIndex < 0) {
