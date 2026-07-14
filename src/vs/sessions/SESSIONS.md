@@ -586,8 +586,10 @@ Repository refresh failures and deleted local refs do not silently replace an
 edited branch. The automation and new-session surfaces share the provider-agnostic
 `contrib/chat/browser/branchPicker` trigger, ActionWidget, filtering, focus, and
 accessibility behavior; their adapters supply branch state and selection side
-effects. An edited automation's saved provider/session type remains pending while
-providers are discovered, so a provisional fallback cannot erase Worktree intent;
+effects. The Automations dialog keeps its form focus cycle, popup command
+allowlist, and popup-first Escape handling in its own adapter instead of changing
+the shared Dialog widget. An edited automation's saved provider/session type
+remains pending while providers are discovered, so a provisional fallback cannot erase Worktree intent;
 the user can still explicitly choose an available alternative. Providers advertise
 Worktree configuration support per session type
 through `ISessionsProvider.getSessionTypeCapabilities`; unsupported targets keep

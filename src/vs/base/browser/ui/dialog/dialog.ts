@@ -51,7 +51,6 @@ export interface IDialogOptions {
 	readonly inputs?: IDialogInputOptions[];
 	readonly keyEventProcessor?: (event: StandardKeyboardEvent) => void;
 	readonly renderBody?: (container: HTMLElement) => void;
-	readonly getBodyFocusableElements?: () => readonly HTMLElement[];
 	readonly renderFooter?: (container: HTMLElement) => void;
 	readonly icon?: ThemeIcon;
 	readonly buttonOptions?: Array<undefined | { sublabel?: string; styleButton?: (button: IButton) => void }>;
@@ -339,11 +338,6 @@ export class Dialog extends Disposable {
 			let sawEscapeKeyDown = false;
 			this._register(addDisposableListener(window, 'keydown', e => {
 				const evt = new StandardKeyboardEvent(e);
-				if (this.isAllowedExternalEventTarget(e.target)) {
-					sawEscapeKeyDown = false;
-					this.options.keyEventProcessor?.(evt);
-					return;
-				}
 
 				if (evt.equals(KeyCode.Escape)) {
 					sawEscapeKeyDown = true;
@@ -391,51 +385,35 @@ export class Dialog extends Disposable {
 
 				let eventHandled = false;
 
-				const isForwardTab = evt.equals(KeyCode.Tab);
-				const isBackwardTab = evt.equals(KeyMod.Shift | KeyCode.Tab);
-				const isForwardButtonArrow = evt.equals(KeyCode.RightArrow) && this.buttonBar?.buttons.some(button => button instanceof ButtonWithDropdown ? button.primaryButton.hasFocus() || button.dropdownButton.hasFocus() : button.hasFocus());
-				const isBackwardButtonArrow = evt.equals(KeyCode.LeftArrow) && this.buttonBar?.buttons.some(button => button instanceof ButtonWithDropdown ? button.primaryButton.hasFocus() || button.dropdownButton.hasFocus() : button.hasFocus());
-
 				// Focus: Next / Previous
-				if (isForwardTab || isBackwardTab || isForwardButtonArrow || isBackwardButtonArrow) {
+				if (evt.equals(KeyCode.Tab) || evt.equals(KeyCode.RightArrow) || evt.equals(KeyMod.Shift | KeyCode.Tab) || evt.equals(KeyCode.LeftArrow)) {
 
 					// Build a list of focusable elements in their visual order
 					const focusableElements: { focus: () => void }[] = [];
 					let focusedIndex = -1;
-					const isButtonArrow = isForwardButtonArrow || isBackwardButtonArrow;
 
-					if (!isButtonArrow) {
-						const bodyFocusableElements = this.options.getBodyFocusableElements?.().filter(element => this.isFocusableElement(element));
-						if (bodyFocusableElements) {
-							for (const element of bodyFocusableElements) {
-								focusableElements.push(element);
-								if (isActiveElement(element)) {
-									focusedIndex = focusableElements.length - 1;
-								}
-							}
-						} else if (this.messageContainer) {
-							// eslint-disable-next-line no-restricted-syntax
-							const links = this.messageContainer.querySelectorAll('a');
-							for (const link of links) {
-								focusableElements.push(link);
-								if (isActiveElement(link)) {
-									focusedIndex = focusableElements.length - 1;
-								}
-							}
-						}
-
-						for (const input of this.inputs) {
-							focusableElements.push(input);
-							if (input.hasFocus()) {
+					if (this.messageContainer) {
+						// eslint-disable-next-line no-restricted-syntax
+						const links = this.messageContainer.querySelectorAll('a');
+						for (const link of links) {
+							focusableElements.push(link);
+							if (isActiveElement(link)) {
 								focusedIndex = focusableElements.length - 1;
 							}
 						}
+					}
 
-						if (this.checkbox) {
-							focusableElements.push(this.checkbox);
-							if (this.checkbox.hasFocus()) {
-								focusedIndex = focusableElements.length - 1;
-							}
+					for (const input of this.inputs) {
+						focusableElements.push(input);
+						if (input.hasFocus()) {
+							focusedIndex = focusableElements.length - 1;
+						}
+					}
+
+					if (this.checkbox) {
+						focusableElements.push(this.checkbox);
+						if (this.checkbox.hasFocus()) {
+							focusedIndex = focusableElements.length - 1;
 						}
 					}
 
@@ -459,7 +437,7 @@ export class Dialog extends Disposable {
 						}
 					}
 
-					if (!isButtonArrow && this.footerContainer) {
+					if (this.footerContainer) {
 						// eslint-disable-next-line no-restricted-syntax
 						const links = this.footerContainer.querySelectorAll('a');
 						for (const link of links) {
@@ -470,26 +448,24 @@ export class Dialog extends Disposable {
 						}
 					}
 
-					if (focusableElements.length > 0) {
-						// Focus next element (with wrapping)
-						if (isForwardTab || isForwardButtonArrow) {
-							const newFocusedIndex = (focusedIndex + 1) % focusableElements.length;
-							focusableElements[newFocusedIndex].focus();
+					// Focus next element (with wrapping)
+					if (evt.equals(KeyCode.Tab) || evt.equals(KeyCode.RightArrow)) {
+						const newFocusedIndex = (focusedIndex + 1) % focusableElements.length;
+						focusableElements[newFocusedIndex].focus();
+					}
+
+					// Focus previous element (with wrapping)
+					else {
+						if (focusedIndex === -1) {
+							focusedIndex = focusableElements.length; // default to focus last element if none have focus
 						}
 
-						// Focus previous element (with wrapping)
-						else {
-							if (focusedIndex === -1) {
-								focusedIndex = focusableElements.length; // default to focus last element if none have focus
-							}
-
-							let newFocusedIndex = focusedIndex - 1;
-							if (newFocusedIndex === -1) {
-								newFocusedIndex = focusableElements.length - 1;
-							}
-
-							focusableElements[newFocusedIndex].focus();
+						let newFocusedIndex = focusedIndex - 1;
+						if (newFocusedIndex === -1) {
+							newFocusedIndex = focusableElements.length - 1;
 						}
+
+						focusableElements[newFocusedIndex].focus();
 					}
 
 					eventHandled = true;
@@ -503,17 +479,12 @@ export class Dialog extends Disposable {
 			}, true));
 
 			this._register(addDisposableListener(window, 'keyup', e => {
-				if (this.isAllowedExternalEventTarget(e.target)) {
-					sawEscapeKeyDown = false;
-					return;
-				}
 				EventHelper.stop(e, true);
 				const evt = new StandardKeyboardEvent(e);
 
 				if (!this.options.disableCloseAction && evt.equals(KeyCode.Escape) && sawEscapeKeyDown) {
 					close();
 				}
-				sawEscapeKeyDown = false;
 			}, true));
 
 			// Detect focus out
@@ -588,10 +559,7 @@ export class Dialog extends Disposable {
 			this._register(toDisposable(() => this.options.onVisibilityChange?.(window, false)));
 
 			// Focus first element (input or button)
-			const firstBodyFocusable = this.options.getBodyFocusableElements?.().find(element => this.isFocusableElement(element));
-			if (firstBodyFocusable) {
-				firstBodyFocusable.focus();
-			} else if (this.inputs.length > 0) {
+			if (this.inputs.length > 0) {
 				this.inputs[0].focus();
 				this.inputs[0].select();
 			} else {
@@ -602,33 +570,6 @@ export class Dialog extends Disposable {
 				});
 			}
 		});
-	}
-
-	private isAllowedExternalEventTarget(target: EventTarget | null): boolean {
-		const window = getWindow(this.container);
-		return target instanceof window.HTMLElement
-			&& !isAncestor(target, this.element)
-			&& this.options.isExternalFocusAllowed?.(target) === true;
-	}
-
-	private isFocusableElement(element: HTMLElement): boolean {
-		if (!element.isConnected || element.tabIndex < 0 || element.hasAttribute('disabled')) {
-			return false;
-		}
-		const window = getWindow(element);
-		for (let current: HTMLElement | null = element; current; current = current.parentElement) {
-			if (current.hidden || current.getAttribute('aria-hidden') === 'true') {
-				return false;
-			}
-			const style = window.getComputedStyle(current);
-			if (style.display === 'none' || style.visibility === 'hidden') {
-				return false;
-			}
-			if (current === this.element) {
-				break;
-			}
-		}
-		return true;
 	}
 
 	private applyStyles() {

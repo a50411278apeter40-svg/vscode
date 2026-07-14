@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import * as DOM from '../../../../../base/browser/dom.js';
 import { DeferredPromise, timeout } from '../../../../../base/common/async.js';
 import { StandardMouseEvent } from '../../../../../base/browser/mouseEvent.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
@@ -23,10 +24,16 @@ import { GitRefType, IGitRepository, IGitService } from '../../../../../workbenc
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
 import { ISessionsProvidersChangeEvent, ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
 import { ISessionsManagementService } from '../../../../services/sessions/common/sessionsManagement.js';
-import { AutomationIsolationGroupActionViewItem, IFormState, IValidationState, isAutomationDialogPopupTarget, updateSaveButtonState } from '../../browser/automationDialog.js';
+import { AutomationIsolationGroupActionViewItem, IFormState, IValidationState, isAutomationDialogPopupTarget, registerAutomationDialogKeyboardNavigation, updateSaveButtonState } from '../../browser/automationDialog.js';
 import { AutomationIsolationModel } from '../../common/isolationGroupModel.js';
 
 const FOLDER = URI.file('/workspace');
+
+function dispatchKey(target: HTMLElement, type: 'keydown' | 'keyup', key: string, shiftKey = false): KeyboardEvent {
+	const event = new KeyboardEvent(type, { key, bubbles: true, cancelable: true, shiftKey });
+	target.dispatchEvent(event);
+	return event;
+}
 
 class RecordingActionWidgetService extends mock<IActionWidgetService>() {
 	override isVisible = false;
@@ -487,5 +494,78 @@ suite('Automation branch picker', () => {
 		const item = sheet.appendChild(document.createElement('button'));
 
 		assert.strictEqual(isAutomationDialogPopupTarget(item), true);
+	});
+});
+
+suite('Automation dialog keyboard navigation', () => {
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('cycles through visible dialog controls', () => {
+		const container = document.createElement('div');
+		document.body.append(container);
+		disposables.add({ dispose: () => container.remove() });
+		const targetWindow = DOM.getWindow(container);
+		const first = container.appendChild(document.createElement('input'));
+		const hiddenContainer = container.appendChild(document.createElement('div'));
+		hiddenContainer.style.display = 'none';
+		const hidden = hiddenContainer.appendChild(document.createElement('input'));
+		const wrapper = container.appendChild(document.createElement('div'));
+		wrapper.tabIndex = 0;
+		const second = wrapper.appendChild(document.createElement('button'));
+		const third = container.appendChild(document.createElement('button'));
+		const navigation = disposables.add(registerAutomationDialogKeyboardNavigation(
+			targetWindow,
+			() => [first, hidden, wrapper, second, third],
+			() => false,
+		));
+		let downstreamKeyDowns = 0;
+		disposables.add(DOM.addDisposableListener(targetWindow, DOM.EventType.KEY_DOWN, () => downstreamKeyDowns++, true));
+
+		navigation.focusFirst();
+		dispatchKey(first, 'keydown', 'Tab');
+		second.focus();
+		dispatchKey(second, 'keydown', 'Tab');
+
+		assert.deepStrictEqual({
+			activeElement: document.activeElement,
+			downstreamKeyDowns,
+		}, {
+			activeElement: third,
+			downstreamKeyDowns: 0,
+		});
+	});
+
+	test('leaves popup keydown handling active and suppresses its Escape keyup', () => {
+		const container = document.createElement('div');
+		document.body.append(container);
+		disposables.add({ dispose: () => container.remove() });
+		const targetWindow = DOM.getWindow(container);
+		const trigger = container.appendChild(document.createElement('button'));
+		const popup = container.appendChild(document.createElement('div'));
+		const popupInput = popup.appendChild(document.createElement('input'));
+		disposables.add(registerAutomationDialogKeyboardNavigation(
+			targetWindow,
+			() => [trigger],
+			target => popup.contains(target),
+		));
+		let downstreamKeyDowns = 0;
+		let downstreamKeyUps = 0;
+		disposables.add(DOM.addDisposableListener(targetWindow, DOM.EventType.KEY_DOWN, () => downstreamKeyDowns++, true));
+		disposables.add(DOM.addDisposableListener(targetWindow, DOM.EventType.KEY_UP, () => downstreamKeyUps++, true));
+
+		popupInput.focus();
+		dispatchKey(popupInput, 'keydown', 'Escape');
+		trigger.focus();
+		dispatchKey(trigger, 'keyup', 'Escape');
+		dispatchKey(trigger, 'keydown', 'Escape');
+		dispatchKey(trigger, 'keyup', 'Escape');
+
+		assert.deepStrictEqual({
+			downstreamKeyDowns,
+			downstreamKeyUps,
+		}, {
+			downstreamKeyDowns: 2,
+			downstreamKeyUps: 1,
+		});
 	});
 });
