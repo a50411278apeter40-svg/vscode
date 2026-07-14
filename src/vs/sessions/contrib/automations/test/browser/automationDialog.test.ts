@@ -211,10 +211,14 @@ suite('Automation branch picker', () => {
 			branch: model.persistedBranch,
 			expanded: trigger.getAttribute('aria-expanded'),
 			disabled: trigger.getAttribute('aria-disabled'),
+			role: trigger.getAttribute('role'),
+			hasPopup: trigger.getAttribute('aria-haspopup'),
 		}, {
 			branch: 'feature/z',
 			expanded: 'false',
 			disabled: 'false',
+			role: 'button',
+			hasPopup: 'listbox',
 		});
 	});
 
@@ -256,11 +260,17 @@ suite('Automation branch picker', () => {
 			disabled: trigger.getAttribute('aria-disabled'),
 			hasChevron: !!trigger.querySelector('.codicon-chevron-down'),
 			pickerVisible: actionWidgetService.isVisible,
+			role: trigger.getAttribute('role'),
+			hasPopup: trigger.getAttribute('aria-haspopup'),
+			tabIndex: trigger.tabIndex,
 		}, {
 			label: 'main',
 			disabled: 'true',
 			hasChevron: false,
 			pickerVisible: false,
+			role: null,
+			hasPopup: null,
+			tabIndex: -1,
 		});
 	});
 

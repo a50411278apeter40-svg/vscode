@@ -41,6 +41,7 @@ export interface IBranchPickerOptions {
 	readonly labelClassName?: string;
 	readonly descriptionClassName?: string;
 	readonly keepDisabledFocusable?: boolean;
+	readonly renderDisabledAsStatic?: boolean;
 	readonly ariaLive?: 'off' | 'polite' | 'assertive';
 }
 
@@ -251,13 +252,23 @@ export class BranchPicker extends Disposable {
 		}
 
 		const disabled = !this._state.canOpen;
+		const renderAsStatic = disabled && this._options.renderDisabledAsStatic === true;
 		const reason = this._state.disabledReason;
 		this._triggerElement.setAttribute('aria-label', disabled && reason
 			? localize('branchPicker.disabledAriaLabel', "{0}. {1}", this._state.label, reason)
 			: localize('branchPicker.triggerAriaLabel', "Pick Branch, {0}", this._state.label));
 		this._triggerElement.setAttribute('aria-disabled', String(disabled));
 		this._triggerElement.setAttribute('aria-busy', String(this._state.status === 'loading'));
-		this._triggerElement.tabIndex = !disabled || this._options.keepDisabledFocusable ? 0 : -1;
+		this._triggerElement.tabIndex = !disabled || this._options.keepDisabledFocusable && !renderAsStatic ? 0 : -1;
+		if (renderAsStatic) {
+			this._triggerElement.removeAttribute('role');
+			this._triggerElement.removeAttribute('aria-haspopup');
+			this._triggerElement.removeAttribute('aria-expanded');
+		} else {
+			this._triggerElement.setAttribute('role', 'button');
+			this._triggerElement.setAttribute('aria-haspopup', 'listbox');
+			this._triggerElement.setAttribute('aria-expanded', String(this._isOpen));
+		}
 		this._triggerElement.title = disabled && reason ? reason : this._state.label;
 		this._descriptionElement.textContent = reason ?? '';
 		this._slotElement.classList.toggle('disabled', disabled);

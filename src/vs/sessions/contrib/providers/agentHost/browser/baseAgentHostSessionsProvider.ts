@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { disposableTimeout, raceTimeout } from '../../../../../base/common/async.js';
+import { disposableTimeout, raceCancellationError } from '../../../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { arrayEquals, structuralEquals } from '../../../../../base/common/equals.js';
@@ -3400,7 +3400,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		// Raw id claimed by _waitForNewSession for this send (released in finally).
 		let committedRawId: string | undefined;
 		try {
-			const committedSession = await this._waitForNewSession(existingKeys, chatResource.scheme, newSessionRawId);
+			const committedSession = await this._waitForNewSession(existingKeys, chatResource.scheme, newSessionRawId, newSession.cancellationToken);
 			if (committedSession) {
 				committedRawId = committedSession.resource.path.substring(1);
 				this._preserveNewSessionConfig(newSession, committedSession.sessionId);
@@ -4058,7 +4058,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * type that happens to appear mid-send — a slow codex send racing against a
 	 * restored claude session, say — is never mistaken for this send's commit.
 	 */
-	private async _waitForNewSession(existingKeys: Set<string>, expectedScheme: string, ownRawId: string): Promise<ISession | undefined> {
+	private async _waitForNewSession(existingKeys: Set<string>, expectedScheme: string, ownRawId: string, token: CancellationToken): Promise<ISession | undefined> {
 		// A candidate backend session commits THIS send when it is unclaimed,
 		// of the expected type, and either (a) carries this send's own id — the
 		// eager/committed id is preserved, so this is the exact match — or
@@ -4112,7 +4112,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 				}));
 				waitDisposables.add(this.onConnectionLost(() => resolve(undefined)));
 			});
-			return await raceTimeout(sessionPromise, 30_000);
+			return await raceCancellationError(sessionPromise, token);
 		} finally {
 			waitDisposables.dispose();
 		}

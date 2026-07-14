@@ -612,7 +612,7 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 			if (token.isCancellationRequested) {
 				throw new CancellationError();
 			}
-			return await this._sendNewChatRequestInBackground(provider, session, options);
+			return await raceCancellationError(this._sendNewChatRequestInBackground(provider, session, options), token);
 		} catch (e) {
 			// The send never committed, so the draft is stranded. Dispose it
 			// through its provider to release the eager backend session before

@@ -321,7 +321,10 @@ export class WorktreeIsolation extends Disposable {
 		let worktreeIncludeFilesProperty: ISchemaProperty<readonly string[]> | undefined;
 		if (gitInfo) {
 			const branchReadOnly = isolationValue === 'folder';
-			branchDefault = isolationValue === 'worktree' ? gitInfo.defaultBranch : gitInfo.currentBranch;
+			const requestedBranch = request.config?.[SessionConfigKey.Branch];
+			branchDefault = isolationValue === 'worktree' && typeof requestedBranch === 'string' && requestedBranch.length > 0
+				? requestedBranch
+				: isolationValue === 'worktree' ? gitInfo.defaultBranch : gitInfo.currentBranch;
 			branchProperty = schemaProperty<string>({
 				type: 'string',
 				title: localize('agentHost.sessionConfig.branch', "Branch"),

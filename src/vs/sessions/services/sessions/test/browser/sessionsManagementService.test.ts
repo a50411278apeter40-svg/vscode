@@ -995,6 +995,38 @@ suite('SessionsManagementService', () => {
 		await configurationDone.complete();
 	});
 
+	test('createAndSendNewChatRequest cancels a pending send and disposes the draft', async () => {
+		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
+		const session = stubSession({
+			sessionId: 's1',
+			providerId: 'test',
+			chats: constObservable([chat]),
+			mainChat: constObservable(chat),
+		});
+		const sendDone = new DeferredPromise<void>();
+		let deleted = false;
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return { folderUri: URI.parse('test:///folder') } as unknown as ISessionWorkspace; }
+			override deleteNewSession(): void {
+				deleted = true;
+			}
+			override async sendRequest(): Promise<ISession> {
+				await sendDone.p;
+				return session;
+			}
+		}(session);
+		const { service } = createSessionsManagementService(session, disposables, provider);
+		const cts = disposables.add(new CancellationTokenSource());
+
+		const request = service.createAndSendNewChatRequest(URI.parse('test:///folder'), { query: 'hi' }, undefined, cts.token);
+		await Promise.resolve();
+		cts.cancel();
+
+		await assert.rejects(request, /Canceled/);
+		assert.strictEqual(deleted, true);
+		await sendDone.complete();
+	});
+
 	test('createAndSendNewChatRequest skips repository configuration for unsupported session types', async () => {
 		const chat: IChat = { ...stubChat, resource: URI.parse('test:///chat') };
 		const session = stubSession({

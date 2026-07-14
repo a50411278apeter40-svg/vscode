@@ -151,6 +151,7 @@ export class AutomationIsolationGroupActionViewItem extends BaseActionViewItem {
 			labelClassName: 'automation-form-branch-name',
 			descriptionClassName: 'automation-form-branch-description',
 			keepDisabledFocusable: true,
+			renderDisabledAsStatic: true,
 			ariaLive: 'polite',
 			onSelectBranch: branch => {
 				this.isolationModel.selectBranch(branch);

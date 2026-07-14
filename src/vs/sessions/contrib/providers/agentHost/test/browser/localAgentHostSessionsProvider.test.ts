@@ -3315,7 +3315,31 @@ suite('LocalAgentHostSessionsProvider', () => {
 		assert.strictEqual(committed.resource.scheme, 'agent-host-codex', `expected the committed session to be the codex session, got ${committed.resource.toString()}`);
 	});
 
-	test('sendRequest rejects when the backend session never commits', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
+	test('sendRequest waits beyond 30 seconds for the backend session to commit', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
+		const provider = createProvider(disposables, agentHost, undefined, {
+			openSession: true,
+			sendRequest: async (): Promise<ChatSendResult> => ({ kind: 'sent' as const, data: {} as ChatSendResult extends { kind: 'sent'; data: infer D } ? D : never }),
+		});
+		const session = provider.createNewSession(URI.parse('file:///home/user/project'), provider.sessionTypes[0].id);
+		const chat = await provider.createNewChat(session.sessionId);
+
+		const request = provider.sendRequest(session.sessionId, chat.resource, { query: 'hello' });
+		await timeout(0);
+		await timeout(30_001);
+		agentHost.addSession(createSession(session.sessionId, { summary: 'Committed Late' }));
+		agentHost.fireAction({
+			channel: buildDefaultChatUri(AgentSession.uri('copilotcli', session.sessionId).toString()),
+			action: { type: ActionType.ChatTurnComplete },
+			serverSeq: 1,
+			origin: undefined,
+		} as ActionEnvelope);
+		await timeout(0);
+
+		const committed = await request;
+		assert.strictEqual(committed.title.get(), 'Committed Late');
+	}));
+
+	test('sendRequest rejects when the provisional session is abandoned before commit', async () => {
 		const provider = createProvider(disposables, agentHost, undefined, {
 			openSession: true,
 			sendRequest: async (): Promise<ChatSendResult> => ({ kind: 'sent' as const, data: {} as ChatSendResult extends { kind: 'sent'; data: infer D } ? D : never }),
@@ -3330,7 +3354,7 @@ suite('LocalAgentHostSessionsProvider', () => {
 		);
 
 		await timeout(0);
-		await timeout(30_000);
+		provider.deleteNewSession(session.sessionId);
 		await rejection;
 		assert.deepStrictEqual(changes.map(change => ({
 			added: change.added.map(session => session.resource.toString()),
@@ -3339,7 +3363,7 @@ suite('LocalAgentHostSessionsProvider', () => {
 			{ added: [session.resource.toString()], removed: [] },
 			{ added: [], removed: [session.resource.toString()] },
 		]);
-	}));
+	});
 
 	test('two concurrent same-type new-session sends each commit to their own session (no swap during a shared download window)', async () => {
 		// Regression: when the first send of a session type triggers a lengthy
