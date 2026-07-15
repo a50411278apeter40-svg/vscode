@@ -39,6 +39,15 @@ export interface IVoiceAudioResponse {
 	readonly isFinal: boolean;
 	readonly codingSessionId?: string;
 	readonly transcript?: string;
+	/**
+	 * Stable id correlating all chunks of ONE narration/response stream, echoed
+	 * by the backend from the `narration_id` the client sent on
+	 * `request_narration` (or the backend's own `turn_id`). Lets playback routing
+	 * decide a response's fate once and keep every chunk on that decision, even
+	 * when responses for different sessions interleave. Absent for untagged
+	 * direct replies and for backends that don't yet echo it (legacy fallback).
+	 */
+	readonly responseId?: string;
 }
 
 export interface IVoiceBargeIn {
@@ -89,6 +98,17 @@ export type IVoiceTurnAutoEndReason = 'vad_silence' | 'stop_phrase';
 export interface IVoiceTurnAutoEnded {
 	readonly reason: IVoiceTurnAutoEndReason;
 	readonly turnId: string;
+}
+
+/**
+ * Payload for a terminal, non-recoverable websocket close (see
+ * {@link IVoiceClientService.onFatalDisconnect}). `code` is the websocket close
+ * code (e.g. 4008 when another window takes over the session); `reason` is the
+ * server-provided close reason, if any.
+ */
+export interface IVoiceFatalDisconnect {
+	readonly code: number;
+	readonly reason: string;
 }
 
 /**
@@ -196,6 +216,8 @@ export interface IVoiceClientService {
 	 */
 	invalidateSessionCache(sessionId: string): void;
 	sendToolResult(callId: string, result: string): void;
+	/** Ask the backend to speak `text` for a session now; returns the narration id echoed on the resulting `audio_response`, or `undefined` if nothing was sent. */
+	requestNarration(codingSessionId: string, kind: 'response' | 'confirmation', text: string): string | undefined;
 	/**
 	 * Notify the backend of a session state transition.
 	 *
@@ -223,6 +245,13 @@ export interface IVoiceClientService {
 	readonly onSessionInit: Event<IVoiceSessionInit>;
 	readonly onError: Event<string>;
 	readonly onDidChangeConnectionState: Event<boolean>;
+	/**
+	 * Fired on a terminal, non-recoverable close (e.g. code 4008 when another
+	 * window takes over the single voice session). Distinct from a transient
+	 * disconnect: consumers should tear down to a clean, restartable state
+	 * rather than entering a reconnect loop.
+	 */
+	readonly onFatalDisconnect: Event<IVoiceFatalDisconnect>;
 	/**
 	 * Fired when the backend ends a held turn on its own (server VAD silence or
 	 * a matched stop phrase). Consumers stop capturing for that turn and clear
