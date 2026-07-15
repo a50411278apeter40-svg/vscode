@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import electron, { Display, Rectangle } from 'electron';
-import { Color } from '../../../base/common/color.js';
+import { Color, RGBA } from '../../../base/common/color.js';
 import { Event } from '../../../base/common/event.js';
 import { join } from '../../../base/common/path.js';
 import { IProcessEnvironment, isLinux, isMacintosh, isWindows } from '../../../base/common/platform.js';
@@ -16,6 +16,7 @@ import { IEnvironmentMainService } from '../../environment/electron-main/environ
 import { ServicesAccessor, createDecorator } from '../../instantiation/common/instantiation.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
+import { IPartsSplash } from '../../theme/common/themeService.js';
 import { IThemeMainService } from '../../theme/electron-main/themeMainService.js';
 import { IOpenEmptyWindowOptions, IWindowOpenable, IWindowSettings, TitlebarStyle, WindowMinimumSize, hasNativeTitlebar, useNativeFullScreen, useWindowControlsOverlay, zoomLevelToZoomFactor } from '../../window/common/window.js';
 import { ICodeWindow, IWindowState, WindowMode, defaultWindowState } from '../../window/electron-main/window.js';
@@ -131,6 +132,59 @@ export interface IDefaultBrowserWindowOptionsOverrides {
 	backgroundColor?: string;
 }
 
+function parseCssColor(color: string | undefined): Color | undefined {
+	if (!color) {
+		return undefined;
+	}
+
+	try {
+		return Color.Format.CSS.parse(color) ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function dimWindowControlsColor(color: string): string {
+	const parsed = parseCssColor(color);
+	if (!parsed) {
+		return color;
+	}
+
+	const dimFactor = 0.5;
+	return Color.Format.CSS.formatRGB(new Color(new RGBA(
+		Math.round(parsed.rgba.r * dimFactor),
+		Math.round(parsed.rgba.g * dimFactor),
+		Math.round(parsed.rgba.b * dimFactor),
+		parsed.rgba.a
+	)));
+}
+
+type IWindowControlsOverlayColorInfo = Pick<IPartsSplash['colorInfo'], 'editorBackground' | 'titleBarBackground' | 'titleBarForeground' | 'titleBarColorCustomizations' | 'titleBarColorsCustomized'> & Partial<Pick<IPartsSplash['colorInfo'], 'background'>>;
+
+function getWindowControlsSymbolColor(backgroundColor: string, editorBackgroundColor: string, windowBackgroundColor: string): string {
+	const background = parseCssColor(backgroundColor);
+	const editorBackground = parseCssColor(editorBackgroundColor);
+	const windowBackground = parseCssColor(windowBackgroundColor);
+	const effectiveEditorBackground = editorBackground && windowBackground ? editorBackground.makeOpaque(windowBackground) : editorBackground ?? windowBackground;
+	const effectiveBackground = background && effectiveEditorBackground ? background.makeOpaque(effectiveEditorBackground) : background ?? effectiveEditorBackground;
+
+	return effectiveBackground?.isDarker() ? '#FFFFFF' : '#000000';
+}
+
+export function getWindowControlsOverlayColors(colorInfo: IWindowControlsOverlayColorInfo | undefined, modernUI: boolean, fallbackBackgroundColor: string): { color: string; symbolColor: string } {
+	const titleBarColor = modernUI && !(colorInfo?.titleBarColorCustomizations?.activeBackground ?? colorInfo?.titleBarColorsCustomized === true)
+		? 'transparent'
+		: colorInfo?.titleBarBackground ?? fallbackBackgroundColor;
+	const editorBackground = colorInfo?.editorBackground ?? fallbackBackgroundColor;
+	const windowBackground = colorInfo?.background ?? fallbackBackgroundColor;
+	const titleBarForeground = colorInfo?.titleBarColorCustomizations?.activeForeground ? colorInfo.titleBarForeground : undefined;
+
+	return {
+		color: titleBarColor,
+		symbolColor: titleBarForeground || getWindowControlsSymbolColor(titleBarColor, editorBackground, windowBackground)
+	};
+}
+
 export function defaultBrowserWindowOptions(accessor: ServicesAccessor, windowState: IWindowState, overrides?: IDefaultBrowserWindowOptionsOverrides, webPreferences?: electron.WebPreferences): electron.BrowserWindowConstructorOptions & { experimentalDarkMode: boolean } {
 	const themeMainService = accessor.get(IThemeMainService);
 	const productService = accessor.get(IProductService);
@@ -219,17 +273,13 @@ export function defaultBrowserWindowOptions(accessor: ServicesAccessor, windowSt
 				options.titleBarOverlay = true;
 			} else {
 
-				// This logic will not perfectly guess the right colors
-				// to use on initialization, but prefer to keep things
-				// simple as it is temporary and not noticeable
-
-				const titleBarColor = themeMainService.getWindowSplash(undefined)?.colorInfo.titleBarBackground ?? themeMainService.getBackgroundColor();
-				const symbolColor = Color.fromHex(titleBarColor).isDarker() ? '#FFFFFF' : '#000000';
+				const splash = themeMainService.getWindowSplash(undefined);
+				const colorInfo = splash?.colorInfo;
+				const titleBarOverlayColors = getWindowControlsOverlayColors(colorInfo, splash?.layoutInfo?.modernUI === true, themeMainService.getBackgroundColor());
 
 				options.titleBarOverlay = {
 					height: 29, // the smallest size of the title bar on windows accounting for the border on windows 11
-					color: titleBarColor,
-					symbolColor
+					...titleBarOverlayColors
 				};
 			}
 		}
